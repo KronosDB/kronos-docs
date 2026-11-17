@@ -43,12 +43,12 @@ Sending with an actor reaches the handler with `source` added. Sending without o
 
 ```ts
 await send(commandBus, AddTool, { toolId: "t-1", model: "DCD791", name: "Cordless drill" }, { actor: "staff-4" })
-console.log(await query(queryBus, GetInventory, {}))
+console.log("sources", JSON.stringify(await query(queryBus, GetInventory, {})))
 ```
 
-```text
+```text title="Output"
 handling t-1 from counter
-[ "counter" ]
+sources ["counter"]
 AddTool was sent without an actor
 ```
 
@@ -67,10 +67,10 @@ const commandBus = interceptingCommandBus(inner, labelled("outer"))
 
 With `labelled` writing its own name into the metadata and printing the metadata keys it received, a command sent on `commandBus` prints:
 
-```text
+```text title="Output"
 outer sees []
-inner sees [ "outer" ]
-handler sees [ "outer", "inner" ]
+inner sees ["outer"]
+handler sees ["outer","inner"]
 ```
 
 Prefer one intercept that calls the others, as `atTheCounter` does, over nested buses. The order is then in one expression.
@@ -108,22 +108,18 @@ The example below parses a request body into a `RegisterCustomer` payload. The s
 ```ts
 const body: unknown = { customerId: "ada", name: "Ada" }
 const parsed = await validate(RegisterCustomer, body)
-console.log(parsed)
+console.log("parsed", JSON.stringify(parsed))
 
 try {
   await validate(RegisterCustomer, { customerId: "", name: "Ada" })
 } catch (error) {
-  console.log((error as Error).message)
+  console.log("rejected", (error as Error).message)
 }
 ```
 
-```text
-{
-  customerId: "ada",
-  name: "Ada",
-  maxRentals: 2,
-}
-validate: "toolstore.RegisterCustomer" failed validation — Too small: expected string to have >=1 characters
+```text title="Output"
+parsed {"customerId":"ada","name":"Ada","maxRentals":2}
+rejected validate: "toolstore.RegisterCustomer" failed validation — Too small: expected string to have >=1 characters
 ```
 
 The text after the dash is whatever the schema library reported. `validate` returns the value directly when the schema validates synchronously and a promise when it does not, so `await` it. `send` does not validate, because its payload parameter is already typed. Validate at the edge, where the data arrives untyped, such as an HTTP body or a message from a queue.
@@ -167,7 +163,7 @@ try {
 }
 ```
 
-```text
+```text title="Output"
 validate: "toolstore.RegisterCustomer" failed validation — Invalid input: expected string, received number; Invalid input: expected string, received undefined
 ```
 

@@ -25,7 +25,7 @@ export const CustomerSuspended = ns.event("CustomerSuspended", {
 
 function labelled(label: string) {
   return <M extends Message>(message: M): M => {
-    console.log(`${label} sees`, Object.keys(message.metadata))
+    console.log(`${label} sees ${JSON.stringify(Object.keys(message.metadata))}`)
     return { ...message, metadata: { ...message.metadata, [label]: true } }
   }
 }
@@ -34,7 +34,7 @@ const inner = interceptingCommandBus(localCommandBus(unitOfWork), labelled("inne
 const commandBus = interceptingCommandBus(inner, labelled("outer"))
 
 export const suspendCustomer = commandHandler(SuspendCustomer, async ({ payload, metadata }, ctx) => {
-  console.log("handler sees", Object.keys(metadata))
+  console.log(`handler sees ${JSON.stringify(Object.keys(metadata))}`)
   ctx.append(CustomerSuspended, payload)
 })
 

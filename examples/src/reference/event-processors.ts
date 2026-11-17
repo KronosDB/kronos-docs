@@ -92,7 +92,7 @@ const app = kronos({
 
 await new Promise((resolve) => setTimeout(resolve, 100))
 
-const running = app.processors.get("inventory-view")!
-console.log(running.status())
+const status = app.processors.get("inventory-view")!.status()
+for (const [field, value] of Object.entries(status)) console.log(`${field.padEnd(9)}  ${value}`)
 console.log([...inventory.values()])
 await app.stop()

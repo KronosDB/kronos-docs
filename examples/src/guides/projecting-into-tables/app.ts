@@ -53,7 +53,9 @@ const tools = await waitFor(
   () => query(queryBus, GetInventory, {}),
   (rows) => rows.length === 2 && rows.some((row) => !row.available),
 )
-console.log(tools)
+for (const tool of tools) {
+  console.log(`${tool.toolId}  ${tool.name.padEnd(14)}  ${tool.available ? "available" : "rented"}`)
+}
 
 await app.stop()
 await pg.close()

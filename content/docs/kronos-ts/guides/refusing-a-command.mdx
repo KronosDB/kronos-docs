@@ -122,6 +122,13 @@ Run the tests from the examples directory:
 bun test src/guides/refusing-a-command
 ```
 
+```text title="Output"
+ 5 pass
+ 0 fail
+ 4 expect() calls
+Ran 5 tests across 1 file.
+```
+
 All five tests pass: the three scenarios and the two caller tests. Changing a reason in the handler to one the enum does not list fails the typecheck before the tests run.
 
 ## Related

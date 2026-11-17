@@ -30,11 +30,14 @@ const app = kronos({
 
 await send(commandBus, AddTool, { toolId: "t-1", model: "DCD791", name: "Cordless drill" })
 await send(commandBus, RegisterCustomer, { customerId: "ada", name: "Ada", maxRentals: 2 })
-console.log(JSON.stringify(await send(commandBus, RentTool, { toolId: "t-1", customerId: "ada" })))
+const outcome = await send(commandBus, RentTool, { toolId: "t-1", customerId: "ada" })
+console.log(`ada rents t-1: ${outcome.rented ? "rented" : outcome.reason}`)
 
 const inventoryView = app.processors.get("inventory-view")!
 const head = await eventStore.getHeadPosition()
 while (inventoryView.position < head) await new Promise((resolve) => setTimeout(resolve, 5))
-console.log(JSON.stringify(await query(queryBus, GetInventory, {})))
+for (const tool of await query(queryBus, GetInventory, {})) {
+  console.log(`${tool.toolId}  ${tool.name.padEnd(14)}  ${tool.available ? "available" : "rented"}`)
+}
 
 await app.stop()

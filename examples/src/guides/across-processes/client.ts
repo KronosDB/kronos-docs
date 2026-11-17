@@ -19,6 +19,8 @@ const tools = await waitFor(
   () => query(infrastructure.queryBus, GetInventory, {}),
   (rows) => rows.length === 2,
 )
-console.log(tools)
+for (const tool of tools) {
+  console.log(`${tool.toolId}  ${tool.name.padEnd(14)}  ${tool.available ? "available" : "rented"}`)
+}
 
 await infrastructure.close()

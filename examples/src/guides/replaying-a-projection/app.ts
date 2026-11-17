@@ -44,28 +44,31 @@ await send(commandBus, AddTool, { toolId: "t-1", model: "DCD791", name: "Cordles
 await send(commandBus, AddTool, { toolId: "t-2", model: "D24000", name: "Tile saw" })
 await send(commandBus, RentTool, { toolId: "t-1", customerId: "ada" })
 
+const summary = (rows: { toolId: string; available: boolean }[]) =>
+  rows.map((row) => `${row.toolId} ${row.available ? "available" : "rented"}`).join(", ")
+
 const before = await waitFor(
   () => query(queryBus, GetInventory, {}),
   (rows) => rows.length === 2 && rows.some((row) => !row.available),
 )
-console.log("before replay", before)
+console.log("before replay:", summary(before))
 
 const admin = adminRoutes(app.processors)
 const started = await admin(new Request("http://localhost/admin/processors/inventory-view/replay", { method: "POST" }))
-console.log("POST replay", started.status, await started.json())
+console.log("POST replay", started.status, JSON.stringify(await started.json()))
 
 const status = await waitFor(
   async () => (await admin(new Request("http://localhost/admin/processors/inventory-view"))).json() as Promise<{ replaying: boolean; caughtUp: boolean }>,
   (current) => !current.replaying && current.caughtUp,
 )
-console.log("GET status", status)
+console.log("GET status", JSON.stringify(status))
 
 const after = await waitFor(
   () => query(queryBus, GetInventory, {}),
   (rows) => rows.length === 2 && rows.some((row) => !row.available),
 )
-console.log("after replay", after)
-console.log("receipts sent", receipts.length)
+console.log("after replay:", summary(after))
+console.log("receipts sent:", receipts.length)
 
 await app.stop()
 await pg.close()

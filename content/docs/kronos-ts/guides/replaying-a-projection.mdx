@@ -88,40 +88,13 @@ The endpoint returns 202 once the processor is started again, not when the repla
 DATABASE_URL=postgresql://postgres:postgres@localhost:5432/toolstore bun run app.ts
 ```
 
-```text
+```text title="Output"
 receipt sent: ada rented t-1
-before replay [
-  {
-    toolId: "t-1",
-    name: "Cordless drill",
-    available: false,
-  }, {
-    toolId: "t-2",
-    name: "Tile saw",
-    available: true,
-  }
-]
-POST replay 202 {
-  replaying: true,
-}
-GET status {
-  running: true,
-  position: "3",
-  caughtUp: true,
-  replaying: false,
-}
-after replay [
-  {
-    toolId: "t-1",
-    name: "Cordless drill",
-    available: false,
-  }, {
-    toolId: "t-2",
-    name: "Tile saw",
-    available: true,
-  }
-]
-receipts sent 1
+before replay: t-1 rented, t-2 available
+POST replay 202 {"replaying":true}
+GET status {"running":true,"position":"3","caughtUp":true,"replaying":false}
+after replay: t-1 rented, t-2 available
+receipts sent: 1
 ```
 
 The receipt line appears once, before the replay: during the replay `ctx.isReplay()` was `true` for all three events. To check that the table is rebuilt from the log, insert a row of your own with `psql` before the replay runs, such as `insert into inventory values ('junk', 'junk', true)`; the reset removes that row, because it is not in the log.

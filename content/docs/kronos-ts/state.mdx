@@ -172,16 +172,14 @@ const sameTool = await Promise.allSettled([
 ])
 
 for (const outcome of sameTool) {
-  if (outcome.status === "fulfilled") console.log("fulfilled", outcome.value)
+  if (outcome.status === "fulfilled") console.log("fulfilled", JSON.stringify(outcome.value))
   else console.log("rejected", isConflict(outcome.reason), outcome.reason.message)
 }
 ```
 
-```text
-fulfilled {
-  rented: true,
-}
-rejected true Append condition violated: 1 conflicting event(s) found after position 3
+```text title="Output"
+fulfilled {"rented":true}
+rejected true Append condition violated: 1 conflicting event(s) found after position 2
 ```
 
 The same happens when one customer rents two different tools at once, because both decisions read the customer's rentals, which keeps a customer from exceeding the rental limit.

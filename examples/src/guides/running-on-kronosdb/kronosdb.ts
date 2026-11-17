@@ -42,7 +42,9 @@ await send(commandBus, AddTool, { toolId: "t-1", model: "DCD791", name: "Cordles
 await send(commandBus, AddTool, { toolId: "t-2", model: "D24000", name: "Tile saw" })
 
 const tools = await waitFor(() => query(queryBus, GetInventory, {}), (rows) => rows.length === 2)
-console.log(tools)
+for (const tool of tools) {
+  console.log(`${tool.toolId}  ${tool.name.padEnd(14)}  ${tool.available ? "available" : "rented"}`)
+}
 
 await app.stop()
 await kdb.close()

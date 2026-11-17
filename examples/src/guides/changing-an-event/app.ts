@@ -58,11 +58,14 @@ const app = kronos({
 await send(commandBus, AddTool, { toolId: "t-3", model: "DWE7491", name: "Table saw", category: "saws" })
 
 const tools = await waitFor(() => query(queryBus, GetInventory, {}), (rows) => rows.length === 3)
-console.log(tools)
+for (const tool of tools) {
+  console.log(`${tool.toolId}  ${tool.name.padEnd(14)}  ${tool.category}`)
+}
 
 const asStored = await log.source({ query: { tags: { toolId: "t-1" } } })
 const asRead = await eventStore.source({ query: { tags: { toolId: "t-1" } } })
-console.log("stored", asStored.events.map((event) => ({ version: event.version, payload: event.payload })))
-console.log("read", asRead.events.map((event) => ({ version: event.version, payload: event.payload })))
+for (const [label, source] of [["stored", asStored], ["read", asRead]] as const) {
+  for (const event of source.events) console.log(`${label.padEnd(6)}  ${event.version}  ${JSON.stringify(event.payload)}`)
+}
 
 await app.stop()

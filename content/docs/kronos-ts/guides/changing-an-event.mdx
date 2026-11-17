@@ -85,48 +85,17 @@ The next change adds a `ToolAddedV2` descriptor for the shape from this guide an
 bun run app.ts
 ```
 
-```text
-[
-  {
-    toolId: "t-1",
-    name: "Cordless drill",
-    category: "uncategorised",
-  }, {
-    toolId: "t-2",
-    name: "Tile saw",
-    category: "uncategorised",
-  }, {
-    toolId: "t-3",
-    name: "Table saw",
-    category: "saws",
-  }
-]
+```text title="Output"
+t-1  Cordless drill  uncategorised
+t-2  Tile saw        uncategorised
+t-3  Table saw       saws
 ```
 
 The script then reads the events of `t-1` from the unwrapped log and from the wrapped store. The log holds the event as it was written, and the store returns it converted:
 
-```text
-stored [
-  {
-    version: "1.0",
-    payload: {
-      toolId: "t-1",
-      model: "DCD791",
-      name: "Cordless drill",
-    },
-  }
-]
-read [
-  {
-    version: "2.0",
-    payload: {
-      toolId: "t-1",
-      model: "DCD791",
-      name: "Cordless drill",
-      category: "uncategorised",
-    },
-  }
-]
+```text title="Output"
+stored  1.0  {"toolId":"t-1","model":"DCD791","name":"Cordless drill"}
+read    2.0  {"toolId":"t-1","model":"DCD791","name":"Cordless drill","category":"uncategorised"}
 ```
 
 ## Related

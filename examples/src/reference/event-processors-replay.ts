@@ -65,7 +65,7 @@ await processor.stop()
 await processor.resetTokens(0n, () => {
   inventory.clear()
 })
-console.log(processor.replaying, processor.position)
+console.log(`replaying: ${processor.replaying}, position: ${processor.position}`)
 
 await processor.start()
 await addTool("t-3", "DWE7491", "Table saw")

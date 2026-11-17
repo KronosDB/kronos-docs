@@ -64,7 +64,7 @@ const app = kronos({
 })
 
 await send(commandBus, AddTool, { toolId: "t-1", model: "DCD791", name: "Cordless drill" }, { actor: "staff-4" })
-console.log(await query(queryBus, GetInventory, {}))
+console.log("sources", JSON.stringify(await query(queryBus, GetInventory, {})))
 
 try {
   await send(commandBus, AddTool, { toolId: "t-2", model: "D24000", name: "Tile saw" })

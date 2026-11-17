@@ -158,11 +158,17 @@ Start the commands process and the views process, each in its own terminal, and 
 
 ```sh
 bun run commands.ts
+```
+
+```text title="Output"
+commands process ready
+```
+
+```sh
 bun run views.ts
 ```
 
-```text
-commands process ready
+```text title="Output"
 views process ready
 ```
 
@@ -174,18 +180,9 @@ bun run client.ts
 
 It sends both commands to the commands process, queries the views process for the inventory and prints it:
 
-```text
-[
-  {
-    toolId: "t-1",
-    name: "Cordless drill",
-    available: true,
-  }, {
-    toolId: "t-2",
-    name: "Tile saw",
-    available: true,
-  }
-]
+```text title="Output"
+t-1  Cordless drill  available
+t-2  Tile saw        available
 ```
 
 Stop the commands process with Ctrl-C and run the client again. With KronosDB it prints `no process handles AddTool` at once. With RabbitMQ it waits for the bus timeout and then throws an `UnavailableError`, because the queue for `AddTool` exists and has no consumer.

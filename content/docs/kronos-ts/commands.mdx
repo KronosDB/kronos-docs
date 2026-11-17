@@ -81,20 +81,15 @@ The result reaches the caller as the resolved value of `send`, whether the handl
 
 ```ts
 const outcome = await send(commandBus, RentTool, { toolId: "t-1", customerId: "ada" })
-console.log(outcome)
+console.log("outcome", JSON.stringify(outcome))
 
 const refusal = await send(commandBus, RentTool, { toolId: "t-2", customerId: "ada" })
-console.log(refusal)
+console.log("refusal", JSON.stringify(refusal))
 ```
 
-```text
-{
-  rented: true,
-}
-{
-  rented: false,
-  reason: "over-limit",
-}
+```text title="Output"
+outcome {"rented":true}
+refusal {"rented":false,"reason":"over-limit"}
 ```
 
 The optional `metadata` argument carries per-request data such as the acting user or a trace header, as described in [Messages](/docs/kronos-ts/messages#metadata).
@@ -155,16 +150,14 @@ const attempts = await Promise.allSettled([
   send(commandBus, RentTool, { toolId: "t-2", customerId: "grace" }),
 ])
 for (const attempt of attempts) {
-  if (attempt.status === "fulfilled") console.log("fulfilled", attempt.value)
+  if (attempt.status === "fulfilled") console.log("fulfilled", JSON.stringify(attempt.value))
   else if (isConflict(attempt.reason)) console.log("conflict", attempt.reason instanceof AppendConditionError)
   else throw attempt.reason
 }
 ```
 
-```text
-fulfilled {
-  rented: true,
-}
+```text title="Output"
+fulfilled {"rented":true}
 conflict true
 ```
 

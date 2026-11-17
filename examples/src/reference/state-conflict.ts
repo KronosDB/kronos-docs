@@ -12,6 +12,6 @@ const sameTool = await Promise.allSettled([
 ])
 
 for (const outcome of sameTool) {
-  if (outcome.status === "fulfilled") console.log("fulfilled", outcome.value)
+  if (outcome.status === "fulfilled") console.log("fulfilled", JSON.stringify(outcome.value))
   else console.log("rejected", isConflict(outcome.reason), outcome.reason.message)
 }

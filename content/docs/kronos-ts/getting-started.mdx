@@ -276,13 +276,15 @@ await send(commandBus, AddTool, { toolId: "t-1", model: "DCD791", name: "Cordles
 await send(commandBus, AddTool, { toolId: "t-2", model: "D24000", name: "Tile saw" })
 await send(commandBus, RegisterCustomer, { customerId: "ada", name: "Ada", maxRentals: 1 })
 
-console.log(JSON.stringify(await send(commandBus, RentTool, { toolId: "t-1", customerId: "ada" })))
-console.log(JSON.stringify(await send(commandBus, RentTool, { toolId: "t-1", customerId: "ada" })))
-console.log(JSON.stringify(await send(commandBus, RentTool, { toolId: "t-2", customerId: "ada" })))
-console.log(JSON.stringify(await send(commandBus, RentTool, { toolId: "t-2", customerId: "linus" })))
+for (const [toolId, customerId] of [["t-1", "ada"], ["t-1", "ada"], ["t-2", "ada"], ["t-2", "linus"]] as const) {
+  const outcome = await send(commandBus, RentTool, { toolId, customerId })
+  console.log(`${customerId} rents ${toolId}: ${outcome.rented ? "rented" : outcome.reason}`)
+}
 
 await projectionsCaughtUp()
-console.log(JSON.stringify(await query(queryBus, GetInventory, {}), null, 2))
+for (const tool of await query(queryBus, GetInventory, {})) {
+  console.log(`${tool.toolId}  ${tool.name.padEnd(14)}  ${tool.available ? "available" : "rented"}`)
+}
 
 await app.stop()
 ```
@@ -295,23 +297,13 @@ bun run main.ts
 
 The four rentals print the four possible outcomes in turn: Ada rents the drill, the drill is already out, Ada is at her limit of one, and Linus is not registered. The inventory then shows the drill as unavailable and the tile saw as available.
 
-```text
-{"rented":true}
-{"rented":false,"reason":"tool-unavailable"}
-{"rented":false,"reason":"over-limit"}
-{"rented":false,"reason":"customer-unknown"}
-[
-  {
-    "toolId": "t-1",
-    "name": "Cordless drill",
-    "available": false
-  },
-  {
-    "toolId": "t-2",
-    "name": "Tile saw",
-    "available": true
-  }
-]
+```text title="Output"
+ada rents t-1: rented
+ada rents t-1: tool-unavailable
+ada rents t-2: over-limit
+linus rents t-2: customer-unknown
+t-1  Cordless drill  rented
+t-2  Tile saw        available
 ```
 
 ## Where to go next

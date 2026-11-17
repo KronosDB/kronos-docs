@@ -95,7 +95,9 @@ await send(commandBus, AddTool, { toolId: "t-1", model: "DCD791", name: "Cordles
 await send(commandBus, AddTool, { toolId: "t-2", model: "D24000", name: "Tile saw" })
 
 const tools = await waitFor(() => query(queryBus, GetInventory, {}), (rows) => rows.length === 2)
-console.log(tools)
+for (const tool of tools) {
+  console.log(`${tool.toolId}  ${tool.name.padEnd(14)}  ${tool.available ? "available" : "rented"}`)
+}
 
 await app.stop()
 await pg.close()
@@ -117,36 +119,36 @@ DATABASE_URL=postgresql://postgres:postgres@localhost:5432/toolstore bun run pos
 
 It prints the two tools:
 
-```text
-[
-  {
-    toolId: "t-1",
-    name: "Cordless drill",
-    available: true,
-  }, {
-    toolId: "t-2",
-    name: "Tile saw",
-    available: true,
-  }
-]
+```text title="Output"
+t-1  Cordless drill  available
+t-2  Tile saw        available
 ```
 
-The database now holds the five tables, both events and the processor's position:
+The database now holds the five tables and both events:
 
 ```sh
-psql "$DATABASE_URL" -c 'select sequence_position, type from kronos_events' \
-  -c 'select processor_name, segment from kronos_token_entries'
+psql "$DATABASE_URL" -c 'select sequence_position, type from kronos_events'
 ```
 
-```text
+```text title="Output"
  sequence_position |        type
 -------------------+---------------------
                  1 | toolstore.ToolAdded
                  2 | toolstore.ToolAdded
+(2 rows)
+```
 
+It also holds the processor's position:
+
+```sh
+psql "$DATABASE_URL" -c 'select processor_name, segment from kronos_token_entries'
+```
+
+```text title="Output"
  processor_name | segment
 ----------------+---------
  inventory-view |       0
+(1 row)
 ```
 
 Running the script a second time rejects `AddTool` for `t-1`, because the `Tool` state folds the stored `ToolAdded` and the handler throws.

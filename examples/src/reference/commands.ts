@@ -166,10 +166,10 @@ await send(commandBus, AddTool, { toolId: "t-2", model: "D24000", name: "Tile sa
 await send(commandBus, RegisterCustomer, { customerId: "ada", name: "Ada", maxRentals: 1 })
 
 const outcome = await send(commandBus, RentTool, { toolId: "t-1", customerId: "ada" })
-console.log(outcome)
+console.log("outcome", JSON.stringify(outcome))
 
 const refusal = await send(commandBus, RentTool, { toolId: "t-2", customerId: "ada" })
-console.log(refusal)
+console.log("refusal", JSON.stringify(refusal))
 
 // Two customers rent the same tool at once
 await send(commandBus, RegisterCustomer, { customerId: "linus", name: "Linus", maxRentals: 2 })
@@ -179,7 +179,7 @@ const attempts = await Promise.allSettled([
   send(commandBus, RentTool, { toolId: "t-2", customerId: "grace" }),
 ])
 for (const attempt of attempts) {
-  if (attempt.status === "fulfilled") console.log("fulfilled", attempt.value)
+  if (attempt.status === "fulfilled") console.log("fulfilled", JSON.stringify(attempt.value))
   else if (isConflict(attempt.reason)) console.log("conflict", attempt.reason instanceof AppendConditionError)
   else throw attempt.reason
 }

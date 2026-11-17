@@ -153,38 +153,37 @@ Run `app.ts` against a database. It adds two tools, rents one, waits until the p
 DATABASE_URL=postgresql://postgres:postgres@localhost:5432/toolstore bun run app.ts
 ```
 
-```text
-[
-  {
-    toolId: "t-1",
-    name: "Cordless drill",
-    available: false,
-  }, {
-    toolId: "t-2",
-    name: "Tile saw",
-    available: true,
-  }
-]
+```text title="Output"
+t-1  Cordless drill  rented
+t-2  Tile saw        available
 ```
 
-The table and the position are in the database:
+The table holds the same two rows:
 
 ```sh
-psql "$DATABASE_URL" -c 'select * from inventory' -c 'select processor_name, token from kronos_token_entries'
+psql "$DATABASE_URL" -c 'select * from inventory'
 ```
 
-```text
+```text title="Output"
  tool_id |      name      | available
 ---------+----------------+-----------
  t-2     | Tile saw       | t
  t-1     | Cordless drill | f
-
- processor_name |              token
-----------------+----------------------------------
- inventory-view | {"position":"3","gapKey":"786"}
+(2 rows)
 ```
 
-`batched-app.ts` is the same application with the batched handlers and gives the same result.
+The processor's position is in the same database:
+
+```sh
+psql "$DATABASE_URL" -c 'select processor_name, token from kronos_token_entries'
+```
+
+```text title="Output"
+ processor_name |              token
+----------------+---------------------------------
+ inventory-view | {"position":"3","gapKey":"786"}
+(1 row)
+```
 
 ## Related
 

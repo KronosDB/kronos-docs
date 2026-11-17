@@ -121,18 +121,9 @@ bun run kronosdb.ts
 
 It prints the two tools:
 
-```text
-[
-  {
-    toolId: "t-1",
-    name: "Cordless drill",
-    available: true,
-  }, {
-    toolId: "t-2",
-    name: "Tile saw",
-    available: true,
-  }
-]
+```text title="Output"
+t-1  Cordless drill  available
+t-2  Tile saw        available
 ```
 
 The server's admin API reports how many events the `toolstore` context holds:
@@ -141,7 +132,7 @@ The server's admin API reports how many events the `toolstore` context holds:
 curl -s http://localhost:9240/api/v1/contexts | jq -c '.[] | select(.name == "toolstore") | {name, head}'
 ```
 
-```text
+```text title="Output"
 {"name":"toolstore","head":2}
 ```
 

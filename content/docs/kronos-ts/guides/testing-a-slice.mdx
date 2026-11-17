@@ -146,9 +146,10 @@ Run the tests:
 bun test src/guides/testing-a-slice
 ```
 
-```text
+```text title="Output"
  7 pass
  0 fail
+Ran 7 tests across 1 file.
 ```
 
 To produce a failure message, change the `customerId` in the `ToolRented` claim of the success scenario to `linus`. The output starts with the scenario as a sentence, `given ToolAdded, CustomerRegistered, when RentTool, then a result, ToolRented`, lists the expected and appended events, and prints `customerId: expected "linus", got "ada"` under the payload differences.

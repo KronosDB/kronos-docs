@@ -26,12 +26,12 @@ export const CustomerRegistered = ns.event("CustomerRegistered", {
 // validate returns the parsed payload, with defaults applied
 const body: unknown = { customerId: "ada", name: "Ada" }
 const parsed = await validate(RegisterCustomer, body)
-console.log(parsed)
+console.log("parsed", JSON.stringify(parsed))
 
 try {
   await validate(RegisterCustomer, { customerId: "", name: "Ada" })
 } catch (error) {
-  console.log((error as Error).message)
+  console.log("rejected", (error as Error).message)
 }
 
 export const registerCustomer = commandHandler(RegisterCustomer, async ({ payload }, ctx) => {

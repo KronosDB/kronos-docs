@@ -12,12 +12,14 @@ await send(commandBus, AddTool, { toolId: "t-1", model: "DCD791", name: "Cordles
 await send(commandBus, AddTool, { toolId: "t-2", model: "D24000", name: "Tile saw" })
 await send(commandBus, RegisterCustomer, { customerId: "ada", name: "Ada", maxRentals: 1 })
 
-console.log(JSON.stringify(await send(commandBus, RentTool, { toolId: "t-1", customerId: "ada" })))
-console.log(JSON.stringify(await send(commandBus, RentTool, { toolId: "t-1", customerId: "ada" })))
-console.log(JSON.stringify(await send(commandBus, RentTool, { toolId: "t-2", customerId: "ada" })))
-console.log(JSON.stringify(await send(commandBus, RentTool, { toolId: "t-2", customerId: "linus" })))
+for (const [toolId, customerId] of [["t-1", "ada"], ["t-1", "ada"], ["t-2", "ada"], ["t-2", "linus"]] as const) {
+  const outcome = await send(commandBus, RentTool, { toolId, customerId })
+  console.log(`${customerId} rents ${toolId}: ${outcome.rented ? "rented" : outcome.reason}`)
+}
 
 await projectionsCaughtUp()
-console.log(JSON.stringify(await query(queryBus, GetInventory, {}), null, 2))
+for (const tool of await query(queryBus, GetInventory, {})) {
+  console.log(`${tool.toolId}  ${tool.name.padEnd(14)}  ${tool.available ? "available" : "rented"}`)
+}
 
 await app.stop()
