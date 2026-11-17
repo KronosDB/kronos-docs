@@ -1,0 +1,194 @@
+---
+title: Project into your own tables
+description: Keep the inventory in a Postgres table that an event handler updates in the same transaction as the processor's position.
+---
+
+By the end of this guide the inventory is stored in an `inventory` table. An event handler writes to it with plain SQL, a query handler reads it, and every write commits together with the processor's token, so the table always matches the processor's position. You need the Postgres setup from [Run on Postgres](/docs/kronos-ts/guides/running-on-postgres): a started pool, `postgresEventStore`, `postgresTokenStore` and `postgresUnitOfWork`.
+
+The tool store in `toolstore.ts` has three commands (`AddTool`, `RentTool`, `ReturnTool`) and the events they append: `ToolAdded`, `ToolRented` and `ToolReturned`. The inventory has one row per tool, with an `available` column. `ToolAdded` creates the row, `ToolRented` makes the tool unavailable and `ToolReturned` makes it available again.
+
+## Create the table
+
+The table is yours, so you create it. Run the statement when the application starts, after `pg.start()`, or put it in your migrations.
+
+```ts
+export const createInventoryTable = `
+  CREATE TABLE IF NOT EXISTS inventory (
+    tool_id   text PRIMARY KEY,
+    name      text NOT NULL,
+    available boolean NOT NULL
+  )`
+```
+
+```ts
+await pg.start()
+await pg.query(createInventoryTable)
+```
+
+## Write the table from an event handler
+
+An event handler that writes to Postgres uses `ctx.sql()` by adding `PostgresCapability` to its context type. In an event handler `ctx.sql()` returns the transaction of the batch being delivered, so every statement commits or rolls back with the processor's token. The `postgresHandler` wrapper supplies it, as the next step shows.
+
+```ts
+export const recordAddedTool = eventHandler(
+  ToolAdded,
+  async ({ payload }, ctx: EventHandlerContext & PostgresCapability) => {
+    await ctx.sql().query(
+      `INSERT INTO inventory (tool_id, name, available) VALUES ($1, $2, true)
+       ON CONFLICT (tool_id) DO UPDATE SET name = EXCLUDED.name`,
+      [payload.toolId, payload.name],
+    )
+  },
+)
+```
+
+The two other handlers update the `available` column with `UPDATE ... SET available = false` and `available = true`. They set the column to a value and do not toggle it, which keeps every handler idempotent, as described under [Idempotency](#idempotency).
+
+```ts
+export const recordRentedTool = eventHandler(
+  ToolRented,
+  async ({ payload }, ctx: EventHandlerContext & PostgresCapability) => {
+    await ctx.sql().query(`UPDATE inventory SET available = false WHERE tool_id = $1`, [payload.toolId])
+  },
+)
+```
+
+## Read it from a query handler
+
+A query handler reads the table the same way. In a query handler `ctx.sql()` is the pool, so the read returns what the processor has committed.
+
+```ts
+export const getInventory = queryHandler(
+  GetInventory,
+  async (_query, ctx: QueryHandlerContext & PostgresCapability) => {
+    const rows = await ctx.sql().query<{ tool_id: string; name: string; available: boolean }>(
+      `SELECT tool_id, name, available FROM inventory ORDER BY tool_id`,
+    )
+    return rows.map((row) => ({ toolId: row.tool_id, name: row.name, available: row.available }))
+  },
+)
+```
+
+## Wire the processor
+
+`postgresHandler(handler, pg)` wraps a handler function and supplies `ctx.sql()` to it. Wrap the handler function, then spread the entry and attach the buses and the processor.
+
+```ts
+const app = kronos({
+  commandHandlers: [addTool, rentTool, returnTool].map((entry) => ({ ...entry, eventStore, commandBus, queryBus })),
+  eventHandlers: [recordAddedTool, recordRentedTool, recordReturnedTool]
+    .map((entry) => ({ ...entry, handler: postgresHandler(entry.handler, pg) }))
+    .map((entry) => ({ ...entry, commandBus, queryBus, processor: inventoryView })),
+  queryHandlers: [getInventory]
+    .map((entry) => ({ ...entry, handler: postgresHandler(entry.handler, pg) }))
+    .map((entry) => ({ ...entry, queryBus })),
+})
+```
+
+All three event handlers name the same processor. The processor is built from `postgresTokenStore(pg)` and `postgresUnitOfWork(unitOfWork, pg)`, from the same pool that `postgresHandler` receives. A handler wrapped with a different pool, or an SQL client of your own, writes outside the transaction. [Postgres](/docs/kronos-ts/infrastructure/postgres) describes how to give the transaction to a query builder.
+
+## Why the table and the token commit together
+
+A processor writes its new token in the same transaction as the handlers' writes. If a handler throws, both roll back and the processor retries. After a restart the processor resumes at the stored token, and the table reflects exactly the events before it, as [Event processors](/docs/kronos-ts/event-processors) describes.
+
+## Idempotency
+
+A handler is idempotent when applying an event twice leaves the same rows as applying it once. The handlers above are: the insert is an upsert on the tool id and the updates assign a value, so a replay that does not clear the table leaves existing rows as they were. [Replay a projection](/docs/kronos-ts/guides/replaying-a-projection) shows the variant that clears the table.
+
+In a command handler `ctx.sql()` is the pool, not a transaction. Its writes commit as they run, before the events are appended, and a rejected append does not undo them. A retried command runs them again, so write them as upserts keyed by an id the command carries.
+
+## Write once per batch
+
+When a processor is behind, for example after a replay, it delivers up to 1000 events in one batch, and a handler that writes per event sends one statement for each. A handler can instead collect the batch's changes and write them in one statement. `onPrepareCommit` on the unit of work runs an action after all the handlers of the batch and before the token is stored, in the same transaction.
+
+The handlers in `batched-inventory.ts` keep their changes in a `WeakMap` keyed by the batch's unit of work. The first handler of a batch registers the write.
+
+```ts
+const pending = new WeakMap<UnitOfWork, Pending>()
+
+function pendingFor(uow: UnitOfWork): Pending {
+  const existing = pending.get(uow)
+  if (existing !== undefined) return existing
+
+  const batch: Pending = { added: new Map(), availability: new Map() }
+  pending.set(uow, batch)
+```
+
+The registered action opens the batch's transaction with `postgresTransaction` and writes the changes, one statement each, with arrays unpacked by `unnest`.
+
+```ts
+  uow.onPrepareCommit(async () => {
+    const tx = await postgresTransaction(uow)
+    if (batch.added.size > 0) {
+      await tx.query(
+        `INSERT INTO inventory (tool_id, name, available)
+         SELECT tool_id, name, true FROM unnest($1::text[], $2::text[]) AS added(tool_id, name)
+         ON CONFLICT (tool_id) DO UPDATE SET name = EXCLUDED.name`,
+        [[...batch.added.keys()], [...batch.added.values()]],
+      )
+    }
+```
+
+The event handlers only record the change. They need no `postgresHandler`, because the write does not use `ctx.sql()`.
+
+```ts
+export const projectAddedTool = eventHandler(ToolAdded, ({ payload }, ctx) => {
+  pendingFor(ctx.unitOfWork).added.set(payload.toolId, payload.name)
+})
+```
+
+`batched(processor, 1000)` sets the batch size explicitly.
+
+```ts
+const inventoryView = batched(eventProcessor("inventory-view", eventStore, postgresTokenStore(pg), uow), 1000)
+```
+
+The array parameters above are for the `pg` driver, which sends a JavaScript array as a Postgres array; other drivers take arrays differently.
+
+## Checking it works
+
+Run `app.ts` against a database. It adds two tools, rents one, waits until the projection has caught up and prints the query result:
+
+```sh
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/toolstore bun run app.ts
+```
+
+```text
+[
+  {
+    toolId: "t-1",
+    name: "Cordless drill",
+    available: false,
+  }, {
+    toolId: "t-2",
+    name: "Tile saw",
+    available: true,
+  }
+]
+```
+
+The table and the position are in the database:
+
+```sh
+psql "$DATABASE_URL" -c 'select * from inventory' -c 'select processor_name, token from kronos_token_entries'
+```
+
+```text
+ tool_id |      name      | available
+---------+----------------+-----------
+ t-2     | Tile saw       | t
+ t-1     | Cordless drill | f
+
+ processor_name |              token
+----------------+----------------------------------
+ inventory-view | {"position":"3","gapKey":"786"}
+```
+
+`batched-app.ts` is the same application with the batched handlers and gives the same result.
+
+## Related
+
+- [Event handlers](/docs/kronos-ts/events) describes the context an event handler receives.
+- [Event processors](/docs/kronos-ts/event-processors) describes batches, tokens, retries and dead letters.
+- [Postgres](/docs/kronos-ts/infrastructure/postgres) describes `ctx.sql()`, `postgresTransaction` and handing the transaction to a query builder.
+- [Replay a projection](/docs/kronos-ts/guides/replaying-a-projection) rebuilds this table from the log.

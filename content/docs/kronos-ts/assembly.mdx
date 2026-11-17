@@ -1,0 +1,95 @@
+---
+title: Assembly
+description: The kronos() call that subscribes handlers to buses, groups event handlers into processors, checks the wiring and starts everything.
+---
+
+Assembly is the single place where handlers meet infrastructure. You call `kronos()` with three lists of handler entries, one for command handlers, one for query handlers and one for event handlers. Each entry is a handler you declared plus the buses, event store and processor it should run against. `kronos()` checks the wiring, subscribes the command and query handlers to their buses, starts a processor for each group of event handlers, and returns an `App`.
+
+Handlers do not name their infrastructure, so one slice of handlers can run in memory in a test and on Postgres in production without changing. The entries carry it instead, and you attach it where you build the app. [Commands](/docs/kronos-ts/commands), [Queries](/docs/kronos-ts/queries) and [Events](/docs/kronos-ts/events) describe the handlers, and [Event processors](/docs/kronos-ts/event-processors) describes what a processor does once it runs.
+
+## The three lists
+
+`kronos({ commandHandlers, queryHandlers, eventHandlers })` takes the three lists, and every list is optional. A state appears in none of them: `ctx.load(Tool, { toolId })` reads the event store of the entry.
+
+The example below wires a command handler, a query handler and two event handlers. The two event handlers name one processor, so they share one position in the log and one batch.
+
+```ts
+const eventStore = inMemoryEventStore()
+const tokenStore = inMemoryTokenStore()
+const commandBus = localCommandBus(unitOfWork)
+const queryBus = localQueryBus(unitOfWork)
+const inventoryView = eventProcessor("inventory-view", eventStore, tokenStore, unitOfWork)
+
+const app = kronos({
+  commandHandlers: [{ ...addTool, name: "add-tool", eventStore, commandBus, queryBus }],
+  queryHandlers: [{ ...getInventory, queryBus }],
+  eventHandlers: [
+    { ...recordTool, commandBus, queryBus, processor: inventoryView },
+    { ...countTools, commandBus, queryBus, processor: inventoryView },
+  ],
+})
+```
+
+Each entry is the handler object spread into a new object together with the infrastructure. The lists are plain arrays, so a host with many handlers builds them with `map` and spreads the same `eventStore`, `commandBus` and `queryBus` onto each.
+
+## Entries
+
+Every entry also takes an optional `name`, a label that boot errors use instead of the descriptor's qualified name. Give an entry a `name` when two entries handle the same descriptor, for example two event handlers for `ToolAdded` on different processors.
+
+| Field | Command handler | Query handler | Event handler |
+| --- | --- | --- | --- |
+| `eventStore` | Required. The log `ctx.load` reads and `ctx.append` writes. | Optional. The log `ctx.load` reads, if the handler loads state. | Optional. The log `ctx.load` reads. |
+| `commandBus` | Required. The bus the handler is subscribed on, and the one `ctx.send` uses. | Not used. | Required. The bus `ctx.send` uses. |
+| `queryBus` | Required. The bus `ctx.query` uses. | Required. The bus the handler is subscribed on, and the one `ctx.query` uses. | Required. The bus `ctx.query` uses. |
+| `processor` | Not used. | Not used. | Required. The processor that delivers events to the handler. |
+
+A command handler appends events to the log, so `kronos()` rejects a command handler entry without an `eventStore`. A query handler may have none, because a read model served from a projection table does not read the log. An event handler cannot append events. To change state it sends a command with `ctx.send`.
+
+## Sharing stores and processors
+
+You do not declare groups to `kronos()`. Which entries belong together is read from the objects they carry, and the two kinds of sharing use different rules.
+
+Stores and buses are shared by object. Entries that carry the same `eventStore` object read and append to the same log. Two wrappers over one log, such as a snapshotting store and the store under it, are two stores. Buses work the same way: every entry that uses one bus carries that bus object.
+
+Processors are shared by name. A processor's position in the log is stored under its name, so two entries that name `"inventory-view"` are one delivery even when each built its own `eventProcessor(...)` value. Entries on one processor receive their events in one batch and one unit of work, and they share one position. When two entries name the same processor, `kronos()` throws at boot unless their processors agree on the event store, token store, unit of work, batch size, polling interval, concurrency, segment count and dead-lettering settings. Objects and functions compare by identity and numbers by value. The simplest way to agree is to build one `eventProcessor(...)` value and pass it to every entry.
+
+## The App
+
+`kronos()` returns an `App`, and the processors are already starting when it returns. `app.processors` maps each processor name to its running processor, which a test uses to wait for a projection to catch up and a control plane uses to pause, start, split and merge segments.
+
+```ts
+console.log([...app.processors.keys()])
+console.log(app.processors.get("inventory-view")?.status().running)
+```
+
+`kronos()` subscribes every command handler and query handler before it starts any processor, so a processor that replays a long history can send a command to a handler on any bus in the app. It does not wait for the processors to claim their segments. To wait for a projection to catch up, poll the running processor's `status()` until `caughtUp` is `true`.
+
+`app.stop()` stops the processors concurrently and resolves when all of them have stopped. A stopping processor writes the position of each segment and releases its claims on the token store, so another node can claim them. It does not close buses, event stores or pools. Close those after `stop()` resolves, with the pool last, because stopping a processor writes tokens.
+
+```ts
+await app.stop()
+console.log(app.processors.get("inventory-view")?.running)
+```
+
+## Boot errors
+
+`kronos()` throws before it starts anything when the wiring cannot work. The errors are plain `Error`s whose messages name the entry and describe the fix.
+
+| Message starts with | Cause | Fix |
+| --- | --- | --- |
+| `kronos: entry "toolstore.AddTool" is a command handler and appends to a log, but no event store was attached` | A command handler entry has no `eventStore`. | Spread an `eventStore` onto the entry. |
+| `kronos: event handler "toolstore.ToolAdded" has no processor` | An event handler entry has no `processor`. | Spread a processor from `eventProcessor(name, eventStore, tokenStore, unitOfWork)` onto the entry. |
+| `kronos: two event handlers name a processor called "inventory-view" but configure it differently` | Two entries use one processor name with different settings. The message lists which settings differ. | Pass one `eventProcessor(...)` value to both entries, or give them different names. |
+| `A different handler is already registered for command "toolstore.AddTool"` | Two different handlers subscribe the same command name, or the same query name, on one bus. | Keep one handler for each name on a bus. |
+| `kronos: entry "toolstore.AddTool" is not configured properly` | A wrapper on the handler needs something that no wrapper outside it provides. | Reorder the wrappers as the hint in the message directs. |
+
+Wrapper chains are checked first, then command and query handlers are subscribed in list order, and the processor groups are built last. A processor error therefore comes after the command and query handlers have been subscribed, and those subscriptions stay on their buses. Build new buses before assembling again after a failed boot.
+
+A processor that fails once the app is running does not surface through `kronos()`. Its failures are retried or dead-lettered as described in [Event processors](/docs/kronos-ts/event-processors), and `status()` on the running processor reports the most recent error that was not recovered.
+
+## Related
+
+- [Commands](/docs/kronos-ts/commands), [Queries](/docs/kronos-ts/queries) and [Events](/docs/kronos-ts/events) describe the handlers an entry carries.
+- [Event processors](/docs/kronos-ts/event-processors) covers the processor values and what a running processor offers.
+- [Interception and validation](/docs/kronos-ts/interception-and-validation) covers handler wrappers and bus interception.
+- [Slices and modules](/docs/kronos-ts/guides/slices-and-modules) shows entries built from a list of slices.

@@ -1,0 +1,189 @@
+---
+title: Event processors
+description: How a processor delivers stored events to handlers, where it starts, how it handles failures, how it runs on several nodes, and how to reset and replay it.
+---
+
+An **event processor** reads the event log from where it last stopped, calls the [event handlers](/docs/kronos-ts/events) registered for each event, and stores how far it got. Event handlers run inside a processor, which is how a stored event updates a read model or triggers a reaction. A processor runs separately from the command that appended the event, so a read model is eventually consistent: a query sent right after a command can run before the processor has delivered the event.
+
+You create a processor with `eventProcessor(...)`, tune it by wrapping it with `batched`, `polling`, `concurrent`, `deadLettering` and `segmented`, and attach it to handlers in the `kronos()` call. `kronos()` starts a running processor for each one and exposes it as `app.processors`.
+
+## Creating a processor
+
+`eventProcessor(name, eventStore, tokenStore, unitOfWork)` describes one delivery: what it is called, the log it reads, where it keeps its position, and the unit of work each batch commits in. The token store holds the position, called a token. With a Postgres token store and unit of work the token write commits in the same transaction as the handlers' writes. With `inMemoryTokenStore()` the position is lost on restart, so the processor starts again from the beginning of the log.
+
+```ts
+const inventoryView = eventProcessor("inventory-view", eventStore, inMemoryTokenStore(), unitOfWork)
+```
+
+The `name` is the processor's durable identity. The position is stored under it, so a processor that restarts under the same name continues where it stopped, and one that starts under a new name starts from the beginning. Rename a processor only to rebuild it from scratch; the old name's stored position stays in the token store until you delete it.
+
+An event handler entry selects its processor with `processor`. Entries that name the same processor share one position, one batch and one unit of work, and the processor calls their handlers for an event in list order. `kronos()` throws at boot, naming the entries, when two entries use one processor name with different settings.
+
+```ts
+const app = kronos({
+  eventHandlers: [
+    { ...recordAddedTool, commandBus, queryBus, processor: inventoryView },
+    { ...markRented, commandBus, queryBus, processor: inventoryView },
+  ],
+})
+```
+
+Delivery is at least once. With a store and unit of work that share a transaction, the projection write and the position update commit together or not at all. With in-memory stores they do not, and a crash between a handler's write and the position write delivers that event again. A handler's writes should go through the unit of work or be safe to repeat.
+
+## Where a new processor starts
+
+A processor with no stored position starts at the beginning of the log and handles every event it holds. That is how a new read model is built from history: add a processor under a new name and it catches up.
+
+To start at the end of the log instead, store the event store's latest token under the processor's name and segment 0 before the processor first runs. Events appended before that are never delivered to it.
+
+```ts
+await addTool("t-1", "DCD791", "Cordless drill")
+await tokenStore.store("inventory-view", 0, await eventStore.latestToken())
+```
+
+## Batches
+
+A processor delivers events in batches, and each batch commits as one unit of work with one position write. At the head of the log a batch holds the one or two events that arrived since the last one. While the processor is behind, catching up after a start or replaying after a reset, it takes larger batches. `batched(processor, size)` sets the batch size, an integer of at least 1. `polling(processor, ms)` sets how long an idle processor waits before looking again, and the base delay before a failed batch is retried. The processor reads again as soon as the store reports a new event, so the interval is only a fallback.
+
+```ts
+const tuned = polling(batched(inventoryView, 200), 250)
+```
+
+| Setting | Default | Set by |
+| --- | --- | --- |
+| Events per batch at the head of the log | 1 | `batched` |
+| Events per batch while behind the head | 1000 | `batched` |
+| Wait before looking again when nothing is ready | 500 ms | `polling` |
+| Delay before the first retry of a failed batch | twice the polling interval | `polling` |
+| Segments | 1 | `segmented` |
+
+`batched` sets both batch sizes. A larger batch commits once for more events, which suits a projection that is always far behind, and costs memory because the batch is held in memory until it commits.
+
+## Sequences
+
+A **sequence** groups events that must be handled in order. It is a function from an event to a string, and events with the same string are always handled in log order. Events with different strings have no order between them. The usual choice is one sequence per tool, customer or other entity.
+
+```ts
+const byToolId: Sequence = (event) => event.tags.find((entry) => entry.key === "toolId")?.value ?? event.identifier
+```
+
+A processor with none of `concurrent`, `deadLettering` or `segmented` handles one event at a time in log order, whatever its sequences. Each of the three takes the sequence function and uses it for something different. `concurrent` runs the sequences of a batch at the same time, each in log order. `deadLettering` parks a failed event and the later events of its sequence. `segmented` assigns each sequence to one segment. Pass the same function to all of them: a different second function throws at construction.
+
+```ts
+const sideBySide = concurrent(tuned, byToolId)
+const parked = deadLettering(sideBySide, inMemoryDeadLetterQueue(), byToolId)
+export const inventoryByTool = segmented(parked, 4, byToolId)
+```
+
+With `concurrent`, handlers for different sequences run at once, so a handler must touch only what belongs to its event's sequence. The batch still commits as one unit of work. When one sequence fails and there is no dead-letter queue, the whole batch is delivered again after the other sequences have settled, so the handlers of the sequences that succeeded run again.
+
+## Retries and backoff
+
+Without a dead-letter queue, a handler that throws fails the batch. The batch's unit of work is rolled back, the position does not advance, and the processor tries again after a delay. The error is logged and set as `error` on the status, and it clears when a later batch succeeds. No event is skipped while the batch keeps failing.
+
+The first delay is twice the polling interval, 1000 ms by default. Each consecutive failure doubles it, up to 60 seconds, and a batch that succeeds sets it back. After a failure the processor retries one event at a time until it is past the failed batch, so the failing event ends up in a batch of its own.
+
+Retrying suits a projection that must be complete. It does not suit an event that can never succeed, which stalls the processor until you fix the handler. A dead-letter queue lets the processor advance past such an event.
+
+## Dead letters
+
+A **dead letter** is an event that failed and was parked in a queue with the error that caused it. With `deadLettering(processor, queue, sequenceOf)`, a handler failure does not fail the batch. The event is parked under its sequence, the batch commits and the processor continues with the events of other sequences. Later events of the parked event's sequence are parked behind it without being delivered, so order within a sequence holds. `inMemoryDeadLetterQueue()` keeps letters in memory, and `@kronos-ts/postgres` provides a persistent queue that parks them in the batch's transaction.
+
+Parked events are not retried by Kronos. Your code calls `reprocessDeadLetters` on the running processor, which replays the oldest parked sequence that passes the optional filter, one letter at a time. A letter that succeeds is removed. The first letter that fails goes back to the front of its sequence with the new error, and the pass ends. The call returns `true` when it processed a sequence and `false` when there was nothing to process.
+
+```ts
+console.log(await processor.reprocessDeadLetters((sequenceId) => sequenceId === "linus"))
+```
+
+A replay runs the event through every handler for its type, including handlers that already succeeded, so handlers must tolerate receiving an event twice.
+
+`deadLetterBackoff(queue, policy)` wraps a queue so that a sequence that keeps failing is not replayed at once. The policy receives the number of attempts and the letter, and returns a delay in milliseconds or `"hold"`. A held sequence stays parked until `retryNow(processingGroup, sequenceIdentifier)` makes it due. `exponentialBackoff(options?)` is a ready policy. Backoff only delays: it never discards a letter.
+
+```ts
+const exponential = exponentialBackoff({ initialDelayMs: 30_000, maxDelayMs: 600_000 })
+const policy: DeadLetterBackoffPolicy = (failure) =>
+  failure.letter.cause.name === "ValidationError" ? "hold" : exponential(failure)
+const queue = deadLetterBackoff(inMemoryDeadLetterQueue({ maxSequences: 100, maxSequenceSize: 50 }), policy)
+```
+
+A queue holds at most `maxSequences` parked sequences and `maxSequenceSize` letters in one, both 1024 by default. A full queue fails the batch, which is retried as above, so the processor stalls with nothing dropped until you make room. A held sequence keeps collecting events, so it can fill this way.
+
+## Running on several nodes
+
+`segmented(processor, count, sequenceOf)` splits a processor into `count` segments, a power of two from 1 to 65536. Each segment has its own position and is handled by one node at a time, so different nodes handle different segments of one processor at once. Each sequence stays in one segment, so its order holds. Every node that runs the application starts the same processor, and the nodes divide the segments among themselves through the token store, which must be a shared one such as Postgres.
+
+The first node to start takes every segment, and another node takes segments that are released or whose node stopped. A node that dies loses its segments after the claim timeout, 10 seconds by default. `count` is read the first time the processor runs. After that the segments stored in the token store decide, so changing `count` does not change a processor that already has stored positions.
+
+Balancing is not automatic. From a processor in `app.processors`, `releaseSegment(segment)` lets another node take a segment, `splitSegment(segment)` divides a segment in two, and `mergeSegment(segment)` joins a segment with its other half. The KronosDB and Axon Server control planes show each segment a node holds and send split, merge and release instructions to these methods, as described on [Infrastructure](/docs/kronos-ts/infrastructure).
+
+## Reset and replay
+
+`resetTokens(startPosition?, reset?)` rewinds a processor so that it handles events again from `startPosition`, by default 0, the start of the log. Use it to rebuild a read model after a handler changed. The processor must be stopped first on every node, and `resetTokens` throws when it is running or when another node holds a segment.
+
+The optional `reset` callback runs in the same unit of work that stores the new positions, so clearing the projection and the reset commit together. If the callback throws, nothing is cleared and the positions stay where they were.
+
+```ts
+const processor = app.processors.get("inventory-view")!
+await processor.stop()
+await processor.resetTokens(0n, () => {
+  inventory.clear()
+})
+console.log(processor.replaying, processor.position)
+```
+
+```text
+true 0n
+```
+
+The replay runs up to the position the processor had reached, not to the head of the log, and it survives a restart. `ctx.isReplay()` in a handler is `true` for events inside the replay and `false` for events after it, so a handler skips side effects that must not repeat:
+
+```ts
+export const recordAddedTool = eventHandler(ToolAdded, ({ payload }, ctx) => {
+  inventory.set(payload.toolId, { toolId: payload.toolId, name: payload.name, available: true })
+  if (!ctx.isReplay()) announcements.push(`new tool: ${payload.name}`)
+})
+```
+
+Start the processor again after the reset. The replay in [Replaying a projection](/docs/kronos-ts/guides/replaying-a-projection) does this against Postgres.
+
+## Checking status
+
+`app.processors.get(name)` returns the running processor. `status()` reports the state of this node's segments of it.
+
+```ts
+const running = app.processors.get("inventory-view")!
+console.log(running.status())
+```
+
+```text
+{
+  running: true,
+  position: 2n,
+  caughtUp: true,
+  replaying: false,
+}
+```
+
+`position` is the lowest position among the segments this node holds. `caughtUp` is true when every segment has handled the events available to it. `replaying` is true during a replay. `error` is the most recent unrecovered processing error, and it is absent when there is none. `segments()` reports the same fields for each segment this node holds, with the segment's `segment` id. `stop()` stops handling, writes where each segment got to and releases the segments so another node can take them at once. `app.stop()` stops every processor, and a stopped processor continues from its stored position when started again.
+
+`kronos()` starts every processor without waiting for it, so a failure of a processor's first start does not reach its caller. Check `status()`, or call `start()` yourself, to find out.
+
+## Errors
+
+| Error | When | What happens |
+| --- | --- | --- |
+| Handler error | A handler throws or rejects. | The batch rolls back and is retried, or the event is parked. The error is logged and set as `status().error`. |
+| `UnableToClaimTokenError` | Another node holds a segment, or this node lost its claim. Test with `isUnableToClaimToken`. | A segment held elsewhere is skipped. A node that lost its claim fails its batch and stops handling the segment. |
+| `DeadLetterQueueOverflowError` | The queue is full when a letter is parked. | The batch is retried with backoff, so the processor stalls until the queue has room. |
+| Boot error from `kronos()` | An event handler has no `processor`, or two entries name one processor with different settings. | `kronos()` throws and names the entries. |
+| Construction error | `batched`, `polling` or `segmented` receives an invalid value, or the sequence functions differ. | The wrapper throws. |
+| Reset error | `resetTokens` is called on a running processor, or another node holds a segment. | `resetTokens` throws, and nothing is rewound. |
+| Segment error | `splitSegment` on a processor without `segmented`, or on a segment that does not exist or is still catching up after a merge. | The method throws and the segment stays as it was. |
+
+## Related
+
+- [Events](/docs/kronos-ts/events) covers the handlers a processor delivers to and the context they receive.
+- [Assembly](/docs/kronos-ts/assembly) covers how `kronos()` groups handlers by processor name and starts them.
+- [Scheduling](/docs/kronos-ts/scheduling) covers the polling worker that `batched` and `polling` also tune.
+- [Postgres](/docs/kronos-ts/infrastructure/postgres) covers the persistent token store and dead-letter queue.
+- [Replaying a projection](/docs/kronos-ts/guides/replaying-a-projection) walks through a reset against a Postgres read model.

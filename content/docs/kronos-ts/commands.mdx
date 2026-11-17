@@ -1,0 +1,211 @@
+---
+title: Commands
+description: How command handlers decide and append events, how commands are sent on a bus, and what the caller receives on success, refusal and failure.
+---
+
+A command handler is a function that receives one command, reads the state it needs, decides, and appends events. The command bus routes each command to its handler and runs the handler in a fresh unit of work. When the handler returns, the events it appended are written to the event store in a single conditional append, and whatever the handler returned becomes the value of the caller's `send`.
+
+This page covers handlers, the context they receive, sending commands, and the buses that carry them. [Messages](/docs/kronos-ts/messages) covers how a command is declared, [State and consistency](/docs/kronos-ts/state) covers `ctx.load` and the conditional append, and [Assembly](/docs/kronos-ts/assembly) covers wiring handlers into an application. Everything on this page is exported from `@kronos-ts/core` unless it names another package.
+
+## Command handlers
+
+`commandHandler(descriptor, handler)` pairs a command descriptor with the function that handles it. The function receives the command message and a context. The message has the payload type that the descriptor's schema produces. This handler adds a tool unless one with that id already exists:
+
+```ts
+export const addTool = commandHandler(AddTool, async ({ payload }, ctx) => {
+  const rental = await ctx.load(Rental, { toolId: payload.toolId })
+  if (rental.exists) throw new Error(`tool ${payload.toolId} already exists`)
+  ctx.append(ToolAdded, payload)
+})
+```
+
+The handler loads the `Rental` state for the tool, which reads the events tagged with that `toolId`. It throws when the tool exists, and otherwise buffers a `ToolAdded` event. Nothing is written until the handler returns, and a handler that throws writes nothing.
+
+`commandHandler` does not subscribe anything. You register the handler by spreading it into an entry of `kronos({ commandHandlers })` together with the event store and the buses it uses:
+
+```ts
+const app = kronos({
+  commandHandlers: [addTool, registerCustomer, rentTool, rentTools].map((handler) => ({
+    ...handler,
+    eventStore,
+    commandBus,
+    queryBus,
+  })),
+})
+```
+
+The entry's `eventStore` is the log that `ctx.load` reads and `ctx.append` writes. Its `commandBus` is the bus the handler is subscribed on and the one `ctx.send` uses, and its `queryBus` is the one `ctx.query` uses. A command handler always needs an event store, and `kronos` rejects an entry without one.
+
+## The context
+
+The second argument of a handler is its context. It belongs to one invocation, so a handler uses it only while it runs. A context used after the handler has finished throws `NoActiveUnitOfWork`.
+
+| Member | What it does |
+| --- | --- |
+| `load(state, id)` | Reads the events a state needs, folds them, and returns the state. The append at commit fails if a matching event has been appended since the read. Events you append are folded into a loaded state, so a later `load` includes them. |
+| `append(event, payload, metadata?)` | Creates an event from a descriptor and a payload, derives its tags, and buffers it. `append([[event, payload], ...])` buffers several. All buffered events are written in one append at commit. |
+| `send(command, payload, metadata?)` | Sends another command and returns its result. |
+| `query(query, payload, metadata?)` | Sends a query and returns its result. |
+
+When the entry's event store supports scheduling, the context also has `schedule`, `scheduleAfter` and `cancelSchedule`, described in [Scheduling](/docs/kronos-ts/scheduling). When the query bus supports subscription queries, it has `emitUpdate`, described in [Queries](/docs/kronos-ts/queries).
+
+## Results
+
+A command descriptor can declare a `result` schema. The handler then returns a value of that type, and the caller's `send` resolves to it. Without a `result`, the handler returns nothing and `send` resolves to `undefined`, typed as `unknown`.
+
+A business refusal that the caller can act on belongs in the result. `RentTool` declares a result that is either `{ rented: true }` or `{ rented: false, reason }`, and the handler returns the refusal instead of throwing:
+
+```ts
+export const rentTool = commandHandler(RentTool, async ({ payload }, ctx) => {
+  const rental = await ctx.load(Rental, { toolId: payload.toolId })
+  const customer = await ctx.load(Customer, { customerId: payload.customerId })
+
+  if (!rental.exists || rental.heldBy !== undefined) return { rented: false, reason: "tool-unavailable" }
+  if (!customer.registered) return { rented: false, reason: "customer-unknown" }
+  if (customer.rentals >= customer.maxRentals) return { rented: false, reason: "over-limit" }
+
+  ctx.append(ToolRented, payload)
+  return { rented: true }
+})
+```
+
+A handler that returns a refusal has appended nothing, so no write happens. Literals in the return value keep their literal types, so `{ rented: false, reason: "over-limit" }` needs no `as const`.
+
+A thrown error is for what the caller can only retry or report: a bug, a broken invariant, or infrastructure failing. The error rejects the caller's `send` with the same error object, and no events are written. [Interception and validation](/docs/kronos-ts/interception-and-validation) covers turning thrown errors into responses at the edge.
+
+The result reaches the caller as the resolved value of `send`, whether the handler ran in the same process or on another instance. Across a transport it is serialized, so it has to be data that survives serialization. Kronos does not check a returned value against the `result` schema at runtime.
+
+## Dispatching
+
+`send(bus, descriptor, payload, metadata?)` creates a command and sends it on a bus. You call it from outside any handler: an HTTP route, a job, a test, a script.
+
+```ts
+const outcome = await send(commandBus, RentTool, { toolId: "t-1", customerId: "ada" })
+console.log(outcome)
+
+const refusal = await send(commandBus, RentTool, { toolId: "t-2", customerId: "ada" })
+console.log(refusal)
+```
+
+```text
+{
+  rented: true,
+}
+{
+  rented: false,
+  reason: "over-limit",
+}
+```
+
+The optional `metadata` argument carries per-request data such as the acting user or a trace header, as described in [Messages](/docs/kronos-ts/messages#metadata).
+
+Inside a handler, `ctx.send(command, payload, metadata?)` does the same through the entry's `commandBus`. The command runs in its own unit of work and commits on its own, whatever the calling handler does afterwards. A handler that sends several commands therefore does not make them atomic. If a later `ctx.send` fails and the error escapes the handler, the earlier commands stay committed.
+
+```ts
+export const rentTools = commandHandler(RentTools, async ({ payload }, ctx) => {
+  const rented: string[] = []
+  const refused: string[] = []
+  for (const toolId of payload.toolIds) {
+    const outcome = await ctx.send(RentTool, { toolId, customerId: payload.customerId })
+    if (outcome.rented) rented.push(toolId)
+    else refused.push(toolId)
+  }
+  return { rented, refused }
+})
+```
+
+Neither `send` nor `ctx.send` copies metadata from the command being handled. [Observability](/docs/kronos-ts/observability) covers `correlatingHandler`, which copies correlation ids from the handled message onto the messages the handler sends.
+
+## Command buses
+
+A command bus delivers each command to the one handler subscribed for its name, and `kronos()` subscribes the handlers of each entry on the entry's `commandBus`. Which bus you create decides whether a command can be handled by another process.
+
+`localCommandBus(unitOfWork)` is the in-process bus. It runs every command, including one sent from another handler, in its own unit of work. It accepts one handler per command name, and subscribing a different handler for a name that already has one throws `A different handler is already registered for command "<name>"`.
+
+A remote bus wraps a local bus and also sends commands for handlers that run in other processes. Each package provides one, and the infrastructure page for it covers its options:
+
+- `kronosDbCommandBus` in `@kronos-ts/kronosdb`, described on [KronosDB](/docs/kronos-ts/infrastructure/kronosdb).
+- `axonServerCommandBus` in `@kronos-ts/axon-server`, described on [Axon Server](/docs/kronos-ts/infrastructure/axon-server).
+- `rabbitMqCommandBus` in `@kronos-ts/rabbitmq`, described on [RabbitMQ](/docs/kronos-ts/infrastructure/rabbitmq).
+
+A remote bus gives each request a deadline, 30 seconds by default, set with `timeoutMs`. A command that passes the deadline rejects the caller with an `UnavailableError`. The handler keeps running on the other instance, so a command that timed out may still have been applied. Each remote bus also accepts a `limits` option that bounds concurrent and pending requests, described on the infrastructure pages. A request over a limit fails at once with an error that `isUnavailable` recognises.
+
+### Local first
+
+`localFirstCommandBus(next, local)` wraps a remote bus so that a command whose handler is subscribed in this process runs on `local` directly, and every other command goes to `next`. A locally handled command is never sent over the network, so the transport's deadline does not apply to it. `local` has to be the same bus that `next` subscribes its handlers on.
+
+```ts
+const rabbit = await rabbitMqConnection("amqp://localhost", {
+  serviceName: "toolstore",
+  instanceId: "counter-1",
+})
+const local = localCommandBus(unitOfWork)
+export const rabbitCommandBus = localFirstCommandBus(rabbitMqCommandBus(local, rabbit, { timeoutMs: 10_000 }), local)
+```
+
+## Conflicts and retries
+
+Kronos does not retry a command when its append conflicts. A conflict reaches the caller as a rejected `send` with an `AppendConditionError`, and the caller decides what to do. Retrying sends the whole command again, so the handler loads its state again and decides again on what is there now.
+
+Sending two `RentTool` commands for the same tool together shows it. Both handlers read the tool before either commits. The first append succeeds, and the condition of the second append matches the `ToolRented` event that the first stored, so the second fails:
+
+```ts
+const attempts = await Promise.allSettled([
+  send(commandBus, RentTool, { toolId: "t-2", customerId: "linus" }),
+  send(commandBus, RentTool, { toolId: "t-2", customerId: "grace" }),
+])
+for (const attempt of attempts) {
+  if (attempt.status === "fulfilled") console.log("fulfilled", attempt.value)
+  else if (isConflict(attempt.reason)) console.log("conflict", attempt.reason instanceof AppendConditionError)
+  else throw attempt.reason
+}
+```
+
+```text
+fulfilled {
+  rented: true,
+}
+conflict true
+```
+
+A conflict means nothing was written, so it is safe to send the command again. An unavailable error is not: the command may have been applied, so a retry needs to recognise its earlier attempt or be harmless to repeat. The caller writes the loop and chooses which failures to retry:
+
+```ts
+export async function sendReturn(commandBus: CommandBus, toolId: string, customerId: string) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await send(commandBus, ReturnTool, { toolId, customerId })
+    } catch (error) {
+      if (isConflict(error) && attempt < 3) continue
+      if (isUnavailable(error)) throw new Error(`the command may or may not have been applied: ${error.message}`)
+      throw error
+    }
+  }
+}
+```
+
+## Failures
+
+A failure that carries a kind is one the caller handles in a specific way. Every store and bus reports these three kinds the same way, and the kind is preserved across a transport: a handler that fails with a kind on another instance fails the caller's `send` with the same kind.
+
+| Kind | Error | Guard | Meaning | What the caller does |
+| --- | --- | --- | --- | --- |
+| `conflict` | `AppendConditionError` | `isConflict` | A matching event was appended between the handler's read and its append. Nothing was written. | Send the command again, or return 409 at an edge. |
+| `unavailable` | `UnavailableError` | `isUnavailable` | The store or bus could not serve the request now: unreachable, failing over, shutting down, over capacity or timed out. | Retry later, or return 503. The command may have been applied. |
+| `no-handler` | `NoHandlerError` | `isNoHandler` | Nothing handles the command's name on this bus or any instance it reaches. | Fix the wiring. Retrying does not help until a handler subscribes. |
+
+Test with the guard and not with `instanceof`. Each store package pins the core version it was built against, so an application can hold two copies of core, and an error from one is not an `instanceof` the other's class. The guards read the `kind` field, which every copy carries.
+
+Other failures:
+
+- A handler throws an error without a kind. It is a bug, a misconfiguration or something for an operator. `send` rejects with that error, nothing is written, and retrying does not help.
+- With `validatingHandler` in the chain, a payload that fails its schema rejects the command with a `validate: "<name>" failed validation` error before the handler runs, and the same applies to each event a handler appends.
+
+## Related
+
+- [Messages](/docs/kronos-ts/messages) covers declaring commands, results and metadata.
+- [State and consistency](/docs/kronos-ts/state) covers states, `ctx.load` and the conditional append.
+- [Assembly](/docs/kronos-ts/assembly) covers wiring handlers, stores and buses with `kronos()`.
+- [Scheduling](/docs/kronos-ts/scheduling) covers `ctx.schedule` and the stores that support it.
+- [Interception and validation](/docs/kronos-ts/interception-and-validation) covers bus interceptors and `validatingHandler`.
+- [Infrastructure](/docs/kronos-ts/infrastructure) lists the transports that carry commands between processes.

@@ -1,0 +1,162 @@
+---
+title: RabbitMQ
+description: The @kronos-ts/rabbitmq package carries commands, queries and subscription query updates between Kronos processes over RabbitMQ.
+---
+
+`@kronos-ts/rabbitmq` is a command bus and a query bus that deliver messages between processes through a RabbitMQ broker. It provides no event store: events are stored in a store such as [Postgres](/docs/kronos-ts/infrastructure/postgres) or [KronosDB](/docs/kronos-ts/infrastructure/kronosdb), and RabbitMQ only carries commands and queries to their handlers. A process that handles a command declares a queue for it, and a process that sends one publishes to the broker and waits for a reply.
+
+Each bus wraps a local bus. Handlers are registered on the local bus and announced to the broker, and a message received from the broker runs its handler through the local bus. RabbitMQ does not route by load and does not track which instances are alive.
+
+## Connecting
+
+`rabbitMqConnection` opens one AMQP connection and declares what this process needs on the broker before any handler subscribes. Two names identify the process: `serviceName` is shared by every replica of one deployment, and `instanceId` is unique per running process.
+
+```ts
+const rabbit = await rabbitMqConnection("amqp://rabbitmq.internal:5672", {
+  serviceName: "toolstore-counter",
+  instanceId,
+})
+```
+
+## Composition
+
+The buses are functions of the connection. Every dispatch goes over the broker, including a dispatch for a handler in the same process. To handle such a message locally, wrap the bus in `localFirstCommandBus(bus, local)` or `localFirstQueryBus(bus, local)`. A message handled locally is not counted by the transport: its shutdown does not wait for it, and its limits and timeout do not apply.
+
+```ts
+const local = localCommandBus(unitOfWork)
+const localQueries = localQueryBus(unitOfWork)
+const commandBus = localFirstCommandBus(rabbitMqCommandBus(local, rabbit), local)
+const queryBus = localFirstQueryBus(rabbitMqQueryBus(localQueries, rabbit), localQueries)
+
+const app = kronos({
+  commandHandlers: [{ ...suspendCustomer, commandBus, queryBus }],
+  queryHandlers: [{ ...getCustomerRentals, queryBus }],
+})
+
+await rabbit.start()
+```
+
+`rabbit.start()` resolves once every handler subscribed so far is bound to its queue and consuming, and rejects if a bind failed. Call it after `kronos()`. Until it resolves, a command for this process can be published to a queue that has no consumer yet. Wrap the outermost bus in `interceptingCommandBus(bus, correlation)` so the intercept covers both the broker path and the local path.
+
+## Queues and exchanges
+
+The connection declares the exchanges when it connects, a queue for each handler when the handler binds, and per-process queues for replies and subscriptions. The names below are the defaults for `serviceName: "toolstore-counter"`, `instanceId: "counter-1"` and the command `toolstore.SuspendCustomer`.
+
+| What | Name | Kind |
+| --- | --- | --- |
+| Commands exchange | `kronos.commands` | topic, durable |
+| Queries exchange | `kronos.queries` | topic, durable |
+| Dead-letter exchange | `kronos.dlx` | topic, durable, only when `retry.deadLetter` is true |
+| Subscription exchanges | `kronos.subscribers.gossip`, `kronos.subscribers.direct` | fanout and direct, durable |
+| A command handler's queue | `kronos.commands.toolstore-counter.toolstore.SuspendCustomer` | durable, shared by the service's replicas, kept when unused |
+| A query handler's queue | `kronos.queries.toolstore-counter.toolstore.GetCustomerRentals` | the same |
+| Reply queues | `kronos.replies.toolstore-counter.counter-1`, `kronos.query-replies.toolstore-counter.counter-1` | exclusive, auto-delete |
+| Subscription queues | `kronos.subscribers.gossip.toolstore-counter.counter-1`, `kronos.subscribers.direct.toolstore-counter.counter-1` | exclusive, auto-delete |
+
+The routing key of a command or query is its qualified name. In a name, characters outside `A-Z a-z 0-9 _ . -` become an underscore.
+
+<Callout type="warn" title="Declarations must match what the broker holds">
+  RabbitMQ rejects redeclaring an existing queue or exchange with different arguments or type. Changing `retry.deadLetter`, `retry.deadLetterExchange` or the prefix against a broker that already holds the old queues makes the declaration fail. Delete the old queues first, or keep the old values until you can.
+</Callout>
+
+`rabbitMqTopologyNames(identity, config)` computes the same names without a broker, which is useful for provisioning queues in advance:
+
+```ts
+const names = rabbitMqTopologyNames({ serviceName: "toolstore-counter", instanceId })
+return {
+  exchange: names.commandsExchange,
+  routingKey: names.commandRoutingKey("toolstore.SuspendCustomer"),
+  queue: names.commandQueue("toolstore.SuspendCustomer"),
+  replies: names.commandReplyQueue(),
+}
+```
+
+## Routing
+
+Replicas of one service bind the same queue and compete for its messages, so one replica handles each message. Services with different `serviceName` values each have a queue of their own for a name, and a message for that name is copied to each of them. A command handled by two services therefore runs twice, and the caller takes the first reply, so give each command one handling service.
+
+The handler's reply goes back to the caller's reply queue, and `timeoutMs` bounds the caller's wait. The whole message, payload and metadata included, is encoded as JSON, so payloads must survive `JSON.stringify`: this transport does not use a serializer.
+
+The transport acknowledges every message it processed, whether the handler succeeded or failed. It rejects a message, which dead-letters it, only when it could not process it at all: the body is not valid JSON, the handler limit is full, or the transport is shutting down. A message that expires in a queue before it is consumed is dropped, and dead-lettered when dead-lettering is on. The package binds no queue to the dead-letter exchange, so a dead-lettered message is kept only if you bind one.
+
+A handler's failure reaches the caller with its original name, message and stack. A conflict arrives as a conflict and an unavailable failure as unavailable, so `isConflict` and `isUnavailable` return what they would on the handling side. Any other failure arrives as a plain `Error`.
+
+## Subscription queries
+
+`subscriptionQuery` works across instances. The initial result is fetched like any query, over the broker, even when the handler is in this process. Updates reach the subscriber on whichever instance it runs, and the filter runs in the emitting process, so a function filter works.
+
+```ts
+const watching = subscriptionQuery(queryBus, GetCustomerRentals, { customerId: "ada" })
+console.log("initial:", await watching.initialResult)
+```
+
+`emitUpdate` runs after the unit of work commits, and not at all if it rolls back. Delivery is best effort. A dropped update is not replayed, a new instance misses updates for subscriptions it has not learned about yet, and a bus holds at most 1024 subscriptions it opened. A subscription is not a durable feed. Query again after an interruption, and use an event processor for changes that must not be missed.
+
+## Options
+
+<TypeTable
+  type={{
+    serviceName: { type: "string", description: "Shared by every replica of the same deployment. Names the queues replicas compete on. Required." },
+    instanceId: { type: "string", description: "Unique per running process. Reply and subscription queue names are derived from it. Required." },
+    topology: { type: "{ prefix?: string }", default: '{ prefix: "kronos" }', description: "Prefix of every exchange and queue name." },
+    retry: { type: "{ deadLetter?: boolean; deadLetterExchange?: string }", default: "{ deadLetter: true }", description: "Whether queues are attached to a dead-letter exchange, and its name (default <prefix>.dlx)." },
+    limits: { type: "{ maxConcurrentHandlers?: number; maxPendingRequests?: number }", default: "128 and 1024", description: "Handlers running at once, and requests awaiting a reply. They apply to commands and queries separately. maxConcurrentHandlers must be below 65535." },
+    shutdownTimeoutMs: { type: "number", default: "30000", description: "How long close() waits for running handlers before it closes the channel anyway." },
+  }}
+/>
+
+Each bus takes an options object as its third argument:
+
+<TypeTable
+  type={{
+    timeoutMs: { type: "number", default: "30000", description: "How long a dispatch waits for the remote handler's reply. Two buses on one connection can differ." },
+  }}
+/>
+
+## When the connection drops
+
+The connection does not reconnect on its own. When the channel errors or closes, every request still waiting for a reply fails at once with `UnavailableError`, and later use of that bus fails the same way. Open subscription queries end with an error, so the subscriber has to subscribe again.
+
+To recover, create a new connection with the same `serviceName` and `instanceId`, build new buses over it, register the handlers again and await `start()`. The queues are still on the broker, so messages published in the meantime stay queued. A command that failed because the channel closed may or may not have run, and the broker may deliver an unacknowledged message again. Handlers must be idempotent, and a caller that resends a command must be able to recognise its own earlier attempt.
+
+## Shutdown
+
+Stop the application first, then close the connection.
+
+```ts
+await app.stop()
+await rabbit.close()
+```
+
+`rabbit.close()` stops consuming, fails the requests this process is waiting on with `UnavailableError` so waiting parents can unwind, and waits for running handlers to reply. It waits at most `shutdownTimeoutMs`, then closes the channels and the socket. If a part of the shutdown fails, `close()` rejects with an `AggregateError` after the socket is closed.
+
+## Errors
+
+Check errors with the guards from `@kronos-ts/core`.
+
+```ts
+if (isNoHandler(error)) return "nobody-handles-it"
+if (isUnavailable(error)) return "outcome-unknown-or-retry"
+if (isConflict(error)) return "conflict"
+if (error instanceof Error) return `${error.name}: ${error.message}`
+```
+
+| What happened | What the caller receives | What to do |
+| --- | --- | --- |
+| No queue is bound for the message's name | `NoHandlerError` (`isNoHandler`), as soon as the broker returns the message | Check that the handling service called `rabbit.start()`. |
+| A queue exists, but nothing is consuming it | `UnavailableError`, "Command X timed out after Nms" (`isUnavailable`) | Start a consumer, or retry. The command may still run later. |
+| A handler on another instance failed with a conflict | `AppendConditionError` (`isConflict`) | Load the state again and decide again. |
+| A handler on another instance failed with `unavailable`, or its handler limit was full | `UnavailableError` (`isUnavailable`) | Retry. |
+| A handler on another instance threw anything else | A plain `Error` with the remote name, message and stack | Report it. |
+| The channel errored or closed | `UnavailableError`, "RabbitMQ channel closed; outstanding delivery outcome is unknown. Recreate the connection." (`isUnavailable`) | Create a new connection. |
+| A bus is at `maxPendingRequests` | `MessagingOverloadedError` before anything is published (`isUnavailable`) | Retry later, or raise the limit. |
+| The connection is closed or closing | `UnavailableError` (`isUnavailable`) | Stop dispatching. |
+| A request with the same message identifier is already pending | `Error`, "Request X is already pending" | Use a fresh identifier for each dispatch. |
+
+Nothing is retried by the package, and a caller that receives an `UnavailableError` for a command that was published cannot determine whether the command ran. Failures inside the transports that no caller is waiting for are written with `console.error`.
+
+## Related
+
+- [Commands](/docs/kronos-ts/commands) and [Queries](/docs/kronos-ts/queries) cover dispatching and handling on any bus.
+- [Across processes](/docs/kronos-ts/guides/across-processes) walks through running handlers in separate processes.
+- [KronosDB](/docs/kronos-ts/infrastructure/kronosdb) and [Axon Server](/docs/kronos-ts/infrastructure/axon-server) provide buses that route through a server instead of a broker.

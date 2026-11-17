@@ -1,0 +1,117 @@
+---
+title: Snapshots
+description: How to cache the result of a state's fold so a load starts from a stored value instead of the first event.
+---
+
+A snapshot is a stored copy of the value a state's fold produced, together with the position of the last event folded into it. The next load of that state reads the snapshot and then only the events after its position, instead of folding every matching event from the beginning. Snapshots are optional. A state gets one when you wrap it with `snapshot()` and load it through an event store that has been wrapped for its storage family.
+
+[State and consistency](/docs/kronos-ts/state) describes states and loads. A snapshot changes how much a load reads: the state that comes back and the conflicts a command can meet are the same with or without one. `snapshot()` and the in-memory wrapper are exported from `@kronos-ts/core`, and the other wrappers are in the package for their store.
+
+## When to use one
+
+The cost of loading a state grows with the number of events its query matches. A tool that is added once and rented a few times has a short history, and a customer who rents tools every week for years has a long one. A snapshot helps when the number of events a load folds is large and keeps growing. For a state whose history stays short, a snapshot adds a read and a write and saves nothing.
+
+## Declaring a snapshot
+
+`snapshot(state, key, when)` returns the same state with a snapshot configuration attached. `key` names the cache, and `when` is a policy that selects the loads after which a snapshot is written.
+
+```ts
+const CustomerRentalsHistory = state({
+  id: { customerId: z.string() },
+  tags: (id) => ({ customerId: id.customerId }),
+  evolve: [
+    () => ({ rented: 0, returned: 0 }),
+    [ToolRented, (history) => ({ ...history, rented: history.rented + 1 })],
+    [ToolReturned, (history) => ({ ...history, returned: history.returned + 1 })],
+  ],
+})
+
+export const CustomerHistory = snapshot(
+  CustomerRentalsHistory,
+  "customer-history-v1",
+  afterEvents(100),
+)
+```
+
+A command handler loads `CustomerHistory` as it would load any state. The state you passed in is not changed, and a state can be wrapped once, so passing an already wrapped state is a type error.
+
+```ts
+export const returnTool = commandHandler(ReturnTool, async ({ payload }, ctx) => {
+  const history = await ctx.load(CustomerHistory, { customerId: payload.customerId })
+  if (history.rented === history.returned) throw new Error("nothing to return")
+  ctx.append(ToolReturned, payload)
+})
+```
+
+The event store on the handler's entry has to be wrapped for snapshots, as described under [Wrapping the event store](#wrapping-the-event-store).
+
+<Callout type="warn">
+  Load either the original state or the wrapped one through a given event store, not both. Both count as the same state, so whichever is loaded first determines whether snapshots are used for both.
+</Callout>
+
+## The key
+
+The key is a string you choose, and it is the only thing that ties a snapshot to a fold. Kronos stores each instance of the state under `<key>:<id>`, so `customer-history-v1` serves every customer without collisions.
+
+Changing the key invalidates the cache. When the meaning of a fold changes, for example when a field that held a count now holds a different count, change `customer-history-v1` to `customer-history-v2`. Every entry the old fold wrote becomes unreachable at once, and the next loads replay from the log and write entries under the new key. Kronos does not delete the old entries. Keep the key when you refactor a fold without changing what it computes.
+
+## Policies
+
+A policy decides after a load whether to write a snapshot. It runs after a load that folded at least one event. `afterEvents(threshold)` writes when the load folded more than `threshold` events, and `whenSourcingTimeExceeds(thresholdMs)` writes when reading and folding took at least that many milliseconds. A load that starts from a snapshot counts only the events after it, so a state with a snapshot written at 100 events and 30 events since has folded 30.
+
+A policy is a function from the load's result, which has `eventsApplied` and `sourcingTimeMs`, to a boolean, so you combine policies with ordinary operators:
+
+```ts
+export const CustomerHistoryOrSlow = snapshot(
+  CustomerRentalsHistory,
+  "customer-history-slow-v1",
+  (result) => afterEvents(100)(result) || whenSourcingTimeExceeds(50)(result),
+)
+```
+
+A policy controls only writes. Every load looks for a snapshot.
+
+## Wrapping the event store
+
+Each storage family has a function that wraps an event store so it can keep snapshots. Wrap the store once, where you assemble the application, and give the wrapped store to every entry that loads a snapshotting state.
+
+```ts
+export const inMemoryStore = inMemorySnapshottingEventStore(inMemoryEventStore())
+
+const pg = postgresPool("postgresql://toolstore:secret@localhost:5432/toolstore")
+export const postgresStore = postgresSnapshottingEventStore(postgresEventStore(pg), pg, jsonSerializer())
+
+const kdb = await kronosDbConnection({ componentName: "toolstore", serializer: jsonSerializer() })
+export const kronosDbStore = kronosDbSnapshottingEventStore(
+  kronosDbEventStore(kdb, "toolstore"),
+  kdb,
+  "toolstore",
+)
+
+const axon = await axonServerConnection({ componentName: "toolstore", serializer: jsonSerializer() })
+export const axonServerStore = axonServerSnapshottingEventStore(
+  axonServerEventStore(axon, "toolstore"),
+  axon,
+  "toolstore",
+)
+```
+
+The in-memory wrapper keeps snapshots in the process, so they are lost when it exits. The Postgres wrapper stores them in the `kronos_snapshots` table and needs the same pool as the event store. The KronosDB and Axon Server wrappers store them on the server, in the given context.
+
+The state has to survive its serializer. With `jsonSerializer()` a state that holds a `Date`, a `Map` or a `bigint` comes back as something else, or fails to encode, and the snapshot is then ignored on every load. Keep a snapshotting state to plain JSON values.
+
+Wrap with `upcastingEventStore` outermost, around the snapshotting store, so every event that reaches a fold is converted. [Versioning](/docs/kronos-ts/versioning) covers upcasting.
+
+A state with a snapshot policy cannot be loaded through a store that has not been wrapped. The command that loads it is rejected, with an error that names the state and the wrapper to add. The types do not catch this, so a test that runs the handler against the same store wiring finds it.
+
+## Misses and bad entries
+
+When there is no snapshot under the key, or the stored value does not have the shape of the state's initial state, for example after you added a field to the fold without changing the key, the load reads the full history and writes a fresh snapshot if the policy allows. Nothing is reported to the caller. A snapshot write that fails is logged with `console.warn` and does not fail the load.
+
+The shape check compares fields and types, not meaning. A field that holds a number before and after a change passes whatever the number now means, which is why a change of meaning needs a new key.
+
+## Related
+
+- [State and consistency](/docs/kronos-ts/state) covers states and loads.
+- [Versioning](/docs/kronos-ts/versioning) covers upcasting events when they are read.
+- [Infrastructure](/docs/kronos-ts/infrastructure) lists the packages that provide each wrapper.

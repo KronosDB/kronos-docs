@@ -1,0 +1,128 @@
+---
+title: Infrastructure
+description: Which package provides the event store, token store, dead-letter queue, scheduling, snapshots and buses, and how to combine them.
+---
+
+Infrastructure is everything that stores data or sends messages between
+processes: the event store, the token store, the dead-letter queue, the
+scheduling and snapshot tiers of the event store, and the command and query
+buses. `@kronos-ts/core` ships an in-memory version of each. The other
+packages ship persistent stores and remote buses that satisfy the same types,
+so you change the infrastructure by changing the lines in your
+[assembly](/docs/kronos-ts/assembly) that construct it. Handlers, states and
+processors stay as they are.
+
+## What each package provides
+
+Each cell names the function that builds the capability. A dash means the
+package does not provide it, and you take it from another column.
+
+| Capability | In-memory (`@kronos-ts/core`) | `@kronos-ts/postgres` | `@kronos-ts/kronosdb` | `@kronos-ts/axon-server` | `@kronos-ts/rabbitmq` |
+| --- | --- | --- | --- | --- | --- |
+| Event store | `inMemoryEventStore` | `postgresEventStore` | `kronosDbEventStore` | `axonServerEventStore` | - |
+| Token store | `inMemoryTokenStore` | `postgresTokenStore` | - | - | - |
+| Dead-letter queue | `inMemoryDeadLetterQueue` | `postgresDeadLetterQueue` | - | - | - |
+| Scheduling | `inMemorySchedulingEventStore` | `postgresSchedulingEventStore` | `kronosDbSchedulingEventStore` | - | - |
+| Snapshots | `inMemorySnapshottingEventStore` | `postgresSnapshottingEventStore` | `kronosDbSnapshottingEventStore` | `axonServerSnapshottingEventStore` | - |
+| Command bus | `localCommandBus` | - | `kronosDbCommandBus` | `axonServerCommandBus` | `rabbitMqCommandBus` |
+| Query bus | `localQueryBus` | - | `kronosDbQueryBus` | `axonServerQueryBus` | `rabbitMqQueryBus` |
+| Subscription queries | `localQueryBus` | - | `kronosDbQueryBus` | `axonServerQueryBus` | `rabbitMqQueryBus` |
+| Transaction shared with your tables | - | `postgresUnitOfWork` | - | - | - |
+
+The scheduling and snapshot entries are wrappers: each takes an event store
+and returns the same store with one more capability, as described in
+[Scheduling](/docs/kronos-ts/scheduling) and
+[Snapshots](/docs/kronos-ts/snapshots). The scheduling wrappers differ in
+where they store the schedule. The in-memory one keeps timers in the process, so
+schedules are lost on restart. The Postgres and KronosDB ones store schedules
+durably.
+
+The last row is the only one where the capability is a transaction rather
+than a store. `postgresUnitOfWork` gives every unit of work a Postgres
+transaction, and the token store, the dead-letter queue and your own handler
+statements join it when an event processor commits a batch. A command
+handler's own statements do not join the transaction its events are appended
+in, and the [Postgres page](/docs/kronos-ts/infrastructure/postgres#writing-to-your-own-tables)
+lists which writes commit together.
+
+Each package has its own page:
+[Postgres](/docs/kronos-ts/infrastructure/postgres),
+[KronosDB](/docs/kronos-ts/infrastructure/kronosdb),
+[Axon Server](/docs/kronos-ts/infrastructure/axon-server) and
+[RabbitMQ](/docs/kronos-ts/infrastructure/rabbitmq).
+
+## Mixing packages
+
+Every capability is built separately, so one application can take the event
+store from one package and the buses from another. Four rules decide which
+combinations work:
+
+- An event processor takes an event store, a token store and a unit of work
+  factory. The token store and the factory must come from the same family:
+  `postgresTokenStore` needs units of work from `postgresUnitOfWork`. The event
+  store can come from anywhere.
+- A handler entry names the event store it appends to and loads from. The
+  capabilities of that store, such as snapshots and scheduling, are the ones
+  its handlers can use.
+- A remote bus wraps a local bus. `rabbitMqCommandBus(local, rabbit)` sends a
+  command to `local` when this process subscribed a handler for it, and through
+  the broker otherwise. Commands received from the broker are dispatched
+  to `local`, so the unit of work you gave `local` applies to them too.
+- A query bus is built from the plain `unitOfWork`, never from
+  `postgresUnitOfWork`, because a read needs no transaction.
+
+The first combination keeps the log and the tokens in Postgres and sends
+messages between processes over RabbitMQ:
+
+```ts
+const pg = postgresPool("postgresql://toolstore:secret@localhost:5432/toolstore")
+await pg.start()
+
+const uow = postgresUnitOfWork(unitOfWork, pg)
+export const eventStore = postgresEventStore(pg)
+export const tokenStore = postgresTokenStore(pg)
+
+const rabbit = await rabbitMqConnection("amqp://localhost", {
+  serviceName: "toolstore",
+  instanceId: "counter-1",
+})
+
+// A remote bus wraps the local bus it falls back to and delivers to.
+export const commandBus = rabbitMqCommandBus(localCommandBus(uow), rabbit)
+export const queryBus = rabbitMqQueryBus(localQueryBus(unitOfWork), rabbit)
+```
+
+The second takes the log and both buses from KronosDB and keeps Postgres for
+the processors, so a projection into your own tables commits in one
+transaction with the processor's token:
+
+```ts
+const kdb = await kronosDbConnection({
+  componentName: "toolstore",
+  context: "toolstore",
+  serializer: jsonSerializer(),
+})
+
+export const kronosDbStore = kronosDbEventStore(kdb, "toolstore")
+export const kronosDbCommands = kronosDbCommandBus(localCommandBus(uow), kdb, "toolstore")
+export const kronosDbQueries = kronosDbQueryBus(localQueryBus(unitOfWork), kdb, "toolstore")
+export const projection = eventProcessor("inventory-view", kronosDbStore, tokenStore, uow)
+```
+
+KronosDB and Axon Server provide no token store, so a processor that reads
+their log keeps its position in Postgres or in memory. The in-memory token
+store loses the position on restart, and the processor reads from the start
+again.
+
+## Query builders and ORMs
+
+Persistence is Postgres. There are no query builder or ORM packages. A
+handler that uses one binds it to the connection behind `ctx.sql().unwrap()`,
+as described on the [Postgres page](/docs/kronos-ts/infrastructure/postgres#writing-to-your-own-tables).
+
+## Related
+
+- [Postgres](/docs/kronos-ts/infrastructure/postgres) covers connecting, the schema and writes to your own tables.
+- [Assembly](/docs/kronos-ts/assembly) shows where stores and buses are passed to `kronos()`.
+- [Event processors](/docs/kronos-ts/event-processors) explains tokens and claims.
+- [Running on Postgres](/docs/kronos-ts/guides/running-on-postgres) is the task guide.

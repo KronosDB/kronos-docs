@@ -1,0 +1,145 @@
+---
+title: Queries
+description: How to declare a query, write its handler, send it, and subscribe to updates.
+---
+
+A **query** is a message with a name and a payload that requests a value, which a query handler returns. Queries are how callers read the state that event handlers have built, such as the inventory of a tool store or the tools a customer has rented. A query never appends an event and never sends a command.
+
+A query handler is a function registered for one query descriptor, and a query bus calls the handler registered for a query's name. A subscription query returns the same initial result and then delivers updates when a handler emits them. Query descriptors are declared like every other message, as described in [Messages](/docs/kronos-ts/messages).
+
+## Declaring a query
+
+A query descriptor has a payload schema, which describes the query's input, and a result schema, which describes the value the handler returns. The result schema types the return value for the caller of `query` and `ctx.query`.
+
+```ts
+export const GetCustomerRentals = ns.query("GetCustomerRentals", {
+  payload: z.object({ customerId: z.string() }),
+  result: z.array(z.string()),
+})
+```
+
+The payload schema is applied by `validatingHandler`, which you wrap around a handler, as described in [Interception and validation](/docs/kronos-ts/interception-and-validation). Without it the payload reaches the handler as the caller sent it. The result schema is not checked at run time, so a handler that returns something else is not detected by the bus. A handler that must guarantee its result parses it with the result schema itself.
+
+## Query handlers
+
+`queryHandler` pairs a descriptor with a function that receives the query message and a context, and returns the result or a promise of it. The handlers below read from in-memory maps, which stand in for a read model that an event handler keeps up to date.
+
+```ts
+export const getInventory = queryHandler(GetInventory, () => [...tools.values()])
+
+export const getCustomerRentals = queryHandler(
+  GetCustomerRentals,
+  ({ payload }) => rentals.get(payload.customerId) ?? [],
+)
+```
+
+Nothing is registered until the handler is placed in the `queryHandlers` list of `kronos()` together with a query bus, as shown under [Query buses](#query-buses).
+
+The handler's context has `ctx.query`, which sends another query, and `ctx.load` and `ctx.source`, which read events from the entry's event store. It has no `append` and no `send`, because a read must not write or cause a change. A handler that decides something and writes the result is a [command handler](/docs/kronos-ts/commands). An entry may omit `eventStore` for a handler that reads from a database table, and `ctx.load` then throws if it is called.
+
+```ts
+export const getCustomerRentalNames = queryHandler(
+  GetCustomerRentalNames,
+  async ({ payload }, ctx) => {
+    const toolIds = await ctx.query(GetCustomerRentals, { customerId: payload.customerId })
+    return toolIds.map((toolId) => tools.get(toolId)?.name ?? toolId)
+  },
+)
+```
+
+`ctx.query` is also available in command handlers and event handlers. The nested query runs as a task of its own, with its own unit of work and transaction. Prefer a read model or a state when a decision needs data, and use `ctx.query` when the data belongs to another module that is reachable only through queries.
+
+## Sending a query
+
+`query(bus, descriptor, payload, metadata?)` sends a query on the bus and returns the value the handler returned, typed by the result schema. The optional metadata is a record of string keys, and it is not copied from one message to the next unless the handler is wrapped in `correlatingHandler`, as described in [Observability](/docs/kronos-ts/observability).
+
+```ts
+const inventory = await query(queryBus, GetInventory, {})
+const names = await query(queryBus, GetCustomerRentalNames, { customerId: "ada" })
+```
+
+## Query buses
+
+A query bus routes a query to the handler registered for its name. `localQueryBus(unitOfWork)` is the in-process bus. `kronos()` subscribes each handler of the `queryHandlers` list on the bus of its entry.
+
+```ts
+const queryBus = localQueryBus(unitOfWork)
+
+const app = kronos({
+  queryHandlers: [
+    { ...getInventory, queryBus },
+    { ...getCustomerRentals, queryBus },
+    { ...getCustomerRentalNames, queryBus },
+  ],
+})
+```
+
+Pass the plain `unitOfWork` to `localQueryBus`, not a transactional one such as `postgresUnitOfWork(unitOfWork, pg)`. A transactional factory is rejected with a type error, and with a thrown `Error` without the type checker, because it would open a database transaction around every read.
+
+The KronosDB, Axon Server and RabbitMQ buses send a query to a process that registered a handler, and `localFirstQueryBus` runs a query locally when a local handler exists for its name. They are set up as described on [Infrastructure](/docs/kronos-ts/infrastructure). Each query reaches exactly one handler and returns one result. Subscribing a second, different handler for a name on the local bus throws an `Error` naming the query, and with `kronos()` that happens at startup.
+
+## Subscription queries
+
+A subscription query returns an initial result and then a stream of updates. It suits a screen that shows the rentals of a customer and must change when a tool is rented. `subscriptionQuery(bus, descriptor, payload)` needs a bus that supports subscriptions, which every bus Kronos ships does, and returns at once.
+
+```ts
+const subscription = subscriptionQuery(queryBus, GetCustomerRentals, { customerId: "ada" })
+console.log("initial:", await subscription.initialResult)
+```
+
+`initialResult` is a promise of the result of the ordinary query. `updates` is an async iterable of the values emitted for this subscription. They are typed `unknown` and by convention have the shape of the result. `close()` ends the subscription. Leaving the `for await` loop, by `break` or an exception, closes it as well. If the initial query fails, `initialResult` rejects and `updates` rejects with the same error.
+
+```ts
+for await (const update of subscription.updates) {
+  console.log("update:", update)
+  break
+}
+
+subscription.close()
+```
+
+### Emitting updates
+
+Updates come from handlers that call `ctx.emitUpdate(descriptor, filter, update)`, usually an event handler after it changes the read model. The filter selects which subscriptions receive the update. Query handlers cannot emit. A handler declares that it needs `emitUpdate` by intersecting `SubscriptionCapability` into its context type, and the entry must carry a bus that supports subscriptions.
+
+```ts
+export const recordRental = eventHandler(
+  ToolRented,
+  ({ payload }, ctx: EventHandlerContext & SubscriptionCapability) => {
+    const toolIds = [...(rentals.get(payload.customerId) ?? []), payload.toolId]
+    rentals.set(payload.customerId, toolIds)
+    ctx.emitUpdate(
+      GetCustomerRentals,
+      payloadEquals({ customerId: payload.customerId }),
+      toolIds,
+    )
+  },
+)
+```
+
+Updates are delivered after the handler's unit of work commits. For an event handler that is the end of the processor's batch, so subscribers receive only updates whose effects were stored, and a failed batch delivers none.
+
+### Filters
+
+A filter is either a function from the subscriber's query payload to a boolean, or `payloadEquals(partial)`. With `payloadEquals`, every key in the partial must deep-equal the same key in the subscriber's payload, and an empty partial matches every subscriber. Use `payloadEquals` when the filter may have to leave the process, because a function runs only where the subscriber's payload is.
+
+### Limits
+
+Each subscription buffers 256 updates. When a consumer falls behind and the buffer is full, the subscription ends and its `updates` iteration rejects with an `Error` reporting the overflow. A bus accepts at most 1024 subscriptions and rejects more with an `UnavailableError`.
+
+## Errors
+
+- `NoHandlerError` (`isNoHandler`): no handler is registered for the query name on this bus, or on any instance a remote bus reaches. Retrying does not help until a handler is subscribed.
+- `UnavailableError` (`isUnavailable`): a remote bus could not serve the query now, because the connection is down, a limit was reached or the deadline passed. Every remote bus has a `timeoutMs` option, 30 seconds by default. The local bus has no deadline, so a handler that never settles leaves the caller waiting.
+- An error the handler throws rejects the `query` call. Over a remote bus it arrives with its name and message, and the kinds `conflict` and `unavailable` are kept. Use the guards `isNoHandler` and `isUnavailable` instead of `instanceof`.
+- A payload that fails its schema under `validatingHandler` rejects the query with an `Error` that names the query and the schema's messages.
+- A subscription that overflows its buffer, or whose initial query fails, ends its `updates` iteration with an error.
+
+## Related
+
+- [Messages](/docs/kronos-ts/messages) declares query descriptors with `ns.query`.
+- [Events](/docs/kronos-ts/events) covers the event handlers that keep read models current and emit updates.
+- [Interception and validation](/docs/kronos-ts/interception-and-validation) covers `interceptingQueryBus` and `validatingHandler`.
+- [Observability](/docs/kronos-ts/observability) covers correlation across `ctx.query`.
+- [Assembly](/docs/kronos-ts/assembly) covers the `queryHandlers` list of `kronos()`.
+- [Infrastructure](/docs/kronos-ts/infrastructure) covers the remote query buses.

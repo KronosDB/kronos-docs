@@ -1,0 +1,154 @@
+---
+title: Run on KronosDB
+description: Start a KronosDB server, declare a context for the tool store, and connect a Kronos application to it for events, commands and queries.
+---
+
+By the end of this guide a KronosDB server holds the tool store's events in a context named `toolstore`, and the application's command bus and query bus send their messages through that server. You need Docker to run the server, and an application that runs on the in-memory stores, such as the one in [Getting started](/docs/kronos-ts/getting-started). KronosDB 0.12 or later is required, because the client uses KronosDB's native protocol.
+
+The application is the tool store from the overview: `AddTool`, `ToolAdded`, `GetInventory`, and a projection into a map, all declared in `toolstore.ts`. What changes is the assembly.
+
+## Start the server
+
+KronosDB listens on two ports. Port 50051 serves everything a Kronos application sends: events, commands and queries. Port 9240 is HTTP, for the admin console, health probes, the admin API and Prometheus metrics. The image keeps its data in the volume `/data`, so a local run needs the ports and a volume.
+
+```sh
+docker run -d --name kronosdb -p 50051:50051 -p 9240:9240 \
+  -v kronosdb-data:/data \
+  ghcr.io/kronosdb/kronosdb:0.14.0
+```
+
+The server is ready when `/ready` on the admin port returns 200:
+
+```sh
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:9240/ready
+```
+
+This server accepts every connection and logs a warning that authentication is disabled. That is acceptable on your own machine. [Security](/docs/kronosdb/security) describes the tokens and TLS settings to apply before the port is reachable from anywhere else.
+
+## Declare a context
+
+A **context** is one event log, and a KronosDB server holds as many as you declare. The server creates one called `default`; the tool store uses its own, so that its events are separate from other applications on the same server. The server reads the contexts to create from a manifest file, which is a TOML file with one table per context.
+
+```toml
+# kronosdb-manifest.toml
+[[contexts]]
+name = "toolstore"
+```
+
+Mount the file into the container and point `KRONOSDB_MANIFEST` at it. The server creates missing contexts at startup and watches the file while it runs. It never deletes a context that you remove from the file.
+
+```sh
+docker run -d --name kronosdb -p 50051:50051 -p 9240:9240 \
+  -v kronosdb-data:/data \
+  -v "$PWD/kronosdb-manifest.toml:/etc/kronosdb/manifest.toml:ro" \
+  -e KRONOSDB_MANIFEST=/etc/kronosdb/manifest.toml \
+  ghcr.io/kronosdb/kronosdb:0.14.0
+```
+
+A context can also be created from the admin console. [Contexts](/docs/kronosdb/contexts) describes what a context holds and [Configuration](/docs/kronosdb/configuration) lists the server's settings and environment variables.
+
+## Install the client
+
+`@kronos-ts/kronosdb` provides the connection, the event store and the two buses.
+
+```sh
+bun add @kronos-ts/core @kronos-ts/kronosdb zod
+```
+
+## Connect
+
+`kronosDbConnection` takes the address of the server, the `context` to use by default, a `componentName` that identifies this application to the server, and the serializer for event and message payloads. Every store and bus you build from the connection shares it.
+
+```ts
+const kdb = await kronosDbConnection({
+  host: process.env.KRONOSDB_HOST ?? "localhost",
+  port: Number(process.env.KRONOSDB_PORT ?? 50051),
+  context: "toolstore",
+  componentName: "toolstore",
+  serializer: jsonSerializer(),
+})
+```
+
+When the server requires a token or TLS, the same options object takes `token` and `ssl`. [KronosDB](/docs/kronos-ts/infrastructure/kronosdb) lists every option.
+
+## Replace the event store and the buses
+
+The event store takes the connection and the name of the context. The two buses each wrap a local bus, and take the connection and the name of a bus. A **bus** in KronosDB is a namespace for commands and queries, independent of contexts, and the tool store gives both the same name, `toolstore`, as its context.
+
+```ts
+const eventStore = kronosDbEventStore(kdb, "toolstore")
+const commandBus = kronosDbCommandBus(localCommandBus(unitOfWork), kdb, "toolstore")
+const queryBus = kronosDbQueryBus(localQueryBus(unitOfWork), kdb, "toolstore")
+```
+
+A command sent from this application is always sent to the server first, even when this application handles it. [Split across processes](/docs/kronos-ts/guides/across-processes) shows how to handle local commands without the trip.
+
+The processor keeps its position in memory here, so after every restart it reads the log from the start and rebuilds the in-memory inventory. A projection that survives restarts needs a durable token store, and the [Postgres guide](/docs/kronos-ts/guides/running-on-postgres) provides one.
+
+```ts
+const inventoryView = eventProcessor("inventory-view", eventStore, inMemoryTokenStore(), unitOfWork)
+```
+
+## Start the application
+
+Await `kdb.start()` after `kronos()`. It resolves once the server has acknowledged every handler, and from then on a command or query for them can be routed.
+
+```ts
+const app = kronos({
+  commandHandlers: [{ ...addTool, eventStore, commandBus, queryBus }],
+  eventHandlers: [{ ...recordAddedTool, commandBus, queryBus, processor: inventoryView }],
+  queryHandlers: [{ ...getInventory, queryBus }],
+})
+await kdb.start()
+```
+
+The rest of the script is the one from the overview. It sends two commands and reads the inventory. At shutdown, stop the application first, so that the processor and in-flight handlers finish, and then close the connection, which drains the buses and closes the socket.
+
+```ts
+await app.stop()
+await kdb.close()
+```
+
+Remote administration is separate and optional. With `kronosDbControlPlane(kdb, app.processors)`, created before `kdb.start()`, the admin console can pause, start, split and merge this application's processors and shows their status.
+
+## Checking it works
+
+Run the script against the server:
+
+```sh
+bun run kronosdb.ts
+```
+
+It prints the two tools:
+
+```text
+[
+  {
+    toolId: "t-1",
+    name: "Cordless drill",
+    available: true,
+  }, {
+    toolId: "t-2",
+    name: "Tile saw",
+    available: true,
+  }
+]
+```
+
+The server's admin API reports how many events the `toolstore` context holds:
+
+```sh
+curl -s http://localhost:9240/api/v1/contexts | jq -c '.[] | select(.name == "toolstore") | {name, head}'
+```
+
+```text
+{"name":"toolstore","head":2}
+```
+
+Running the script a second time rejects `AddTool`, because the log already holds `ToolAdded` for `t-1`. If the context name is not one the server has, the processor logs a stream error that reads `context not found` followed by the name. Declare the context in the manifest and restart the application.
+
+## Related
+
+- [KronosDB](/docs/kronos-ts/infrastructure/kronosdb) lists the connection options, the stores and the buses in `@kronos-ts/kronosdb`.
+- [Getting started with KronosDB](/docs/kronosdb/getting-started) runs the server on its own.
+- [Split across processes](/docs/kronos-ts/guides/across-processes) runs commands and queries between two applications through the server.

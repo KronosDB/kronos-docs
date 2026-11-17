@@ -1,0 +1,188 @@
+---
+title: Interception and validation
+description: How to change or reject messages sent on a bus, wrap handlers with your own behaviour, and check payloads against their schemas.
+---
+
+Interception, handler wrappers and validation are the three places where your code runs between a message and a handler. An intercept is a function on a bus that receives every command or query sent through it, before the bus routes it. A handler wrapper is a function that takes a handler and returns another one, so it can run code around the handler. Validation checks a payload against the schema of the descriptor for that message, using `validate` or the handler wrapper `validatingHandler`.
+
+All three are plain functions that you compose where you assemble the app, as shown on the [Assembly](/docs/kronos-ts/assembly) page. Correlation and logging are built from the same pieces and are documented in [Observability](/docs/kronos-ts/observability).
+
+## Intercepting a bus
+
+An `Intercept` is a function from a message to a message of the same type. `interceptingCommandBus(bus, intercept)` returns a bus that calls the intercept on every command before sending it on `bus`, and `interceptingQueryBus(bus, intercept)` does the same for queries. The result has the same type as the bus you passed in.
+
+An intercept receives the whole message: `kind`, `identifier`, `name`, `payload`, `metadata` and `timestamp`. It can return the message unchanged, return a copy with different fields, or throw to reject it. The two intercepts below reject a message that was sent without an actor and add a `source` to the metadata of every message.
+
+```ts
+const requireActor = <M extends Message>(message: M): M => {
+  if (typeof message.metadata.actor !== "string") {
+    throw new Error(`${message.name.name} was sent without an actor`)
+  }
+  return message
+}
+
+const addSource = <M extends Message>(message: M): M => ({
+  ...message,
+  metadata: { ...message.metadata, source: "counter" },
+})
+```
+
+An intercept is synchronous. If you need an asynchronous check, such as a permission lookup, do it in a handler wrapper or before you call `send`.
+
+Several intercepts compose into one function, written in the order they run. The result is passed to the bus, and the handler receives the message the last intercept returned.
+
+```ts
+const atTheCounter = <M extends Message>(message: M): M => addSource(requireActor(message))
+
+const eventStore = inMemoryEventStore()
+const commandBus = interceptingCommandBus(localCommandBus(unitOfWork), atTheCounter)
+const queryBus = interceptingQueryBus(localQueryBus(unitOfWork), addSource)
+```
+
+Sending with an actor reaches the handler with `source` added. Sending without one is rejected before the handler is called:
+
+```ts
+await send(commandBus, AddTool, { toolId: "t-1", model: "DCD791", name: "Cordless drill" }, { actor: "staff-4" })
+console.log(await query(queryBus, GetInventory, {}))
+```
+
+```text
+handling t-1 from counter
+[ "counter" ]
+AddTool was sent without an actor
+```
+
+`ctx.send` and `ctx.query` inside a handler go through the bus the entry carries. When that bus is an intercepting bus, the intercept runs for those messages as well, so an intercept that requires an actor also rejects a handler that sends a command without one.
+
+Wrap the outermost bus you use, outside any remote bus such as `rabbitMqCommandBus(local, rabbit)`. An intercept inside a remote bus applies only to commands handled in this process, and commands sent to another process would go without what the intercept adds.
+
+### Ordering
+
+When intercepting buses are nested, the outermost one runs first. Each intercept receives what the one outside it returned, and the handler receives the result of the innermost.
+
+```ts
+const inner = interceptingCommandBus(localCommandBus(unitOfWork), labelled("inner"))
+const commandBus = interceptingCommandBus(inner, labelled("outer"))
+```
+
+With `labelled` writing its own name into the metadata and printing the metadata keys it received, a command sent on `commandBus` prints:
+
+```text
+outer sees []
+inner sees [ "outer" ]
+handler sees [ "outer", "inner" ]
+```
+
+Prefer one intercept that calls the others, as `atTheCounter` does, over nested buses. The order is then in one expression.
+
+## Handler wrappers
+
+A handler wrapper is a function that takes a handler function and returns a handler function. A handler function takes a message and a context, so a wrapper can read the message, run code before and after, or replace the result. You apply it by replacing the `handler` property of an entry, for example `handler: timedHandler(returnTool.handler)`, and every kind of handler can be wrapped. This wrapper measures how long the handler took:
+
+```ts
+type AnyHandler = (message: any, context: any) => any
+
+// A wrapper that changes nothing about the context
+export function timedHandler<H extends AnyHandler>(next: H) {
+  return async (message: Parameters<H>[0], context: Parameters<H>[1]) => {
+    const started = performance.now()
+    try {
+      return await next(message, context)
+    } finally {
+      console.log(`${message.name.name} took ${(performance.now() - started).toFixed(1)} ms`)
+    }
+  }
+}
+```
+
+`H` is the whole function type, so the wrapped handler keeps the parameter types of the original. Wrappers compose by nesting. The one written last is outermost, and it runs first. Map over a list of handlers and replace `handler` before attaching the infrastructure to give every entry the same wrapper.
+
+Kronos ships several wrappers built this way. `correlatingHandler`, `loggingHandler` and `otlpHandler` are covered in [Observability](/docs/kronos-ts/observability), and `postgresHandler` is covered in [Postgres](/docs/kronos-ts/infrastructure/postgres).
+
+## Validation
+
+A descriptor carries its payload schema, so any code that holds a descriptor can check a payload against it. `validate(descriptor, payload)` runs the schema and returns the parsed value, which is the value the rest of the system should use, because a schema may apply defaults, coerce and transform. If the payload does not match, it throws.
+
+The example below parses a request body into a `RegisterCustomer` payload. The schema's default gives `maxRentals` a value the body did not have, and the second call throws.
+
+```ts
+const body: unknown = { customerId: "ada", name: "Ada" }
+const parsed = await validate(RegisterCustomer, body)
+console.log(parsed)
+
+try {
+  await validate(RegisterCustomer, { customerId: "", name: "Ada" })
+} catch (error) {
+  console.log((error as Error).message)
+}
+```
+
+```text
+{
+  customerId: "ada",
+  name: "Ada",
+  maxRentals: 2,
+}
+validate: "toolstore.RegisterCustomer" failed validation — Too small: expected string to have >=1 characters
+```
+
+The text after the dash is whatever the schema library reported. `validate` returns the value directly when the schema validates synchronously and a promise when it does not, so `await` it. `send` does not validate, because its payload parameter is already typed. Validate at the edge, where the data arrives untyped, such as an HTTP body or a message from a queue.
+
+### Validating a handler
+
+`validatingHandler(next, descriptor)` wraps a handler so that its payloads are validated. It validates the payload of the message the handler receives, and the handler receives the parsed payload. It also validates the payload of every message the handler creates with `ctx.append`, `ctx.send`, `ctx.query`, `ctx.schedule` and `ctx.scheduleAfter`, and the created message carries the parsed value. One wrapper serves command, query and event handlers.
+
+```ts
+export const registerCustomer = commandHandler(RegisterCustomer, async ({ payload }, ctx) => {
+  ctx.append(CustomerRegistered, { ...payload, maxRentals: payload.maxRentals - 2 })
+})
+
+const commandBus = localCommandBus(unitOfWork)
+const app = kronos({
+  commandHandlers: [
+    {
+      ...registerCustomer,
+      handler: validatingHandler(registerCustomer.handler, registerCustomer.descriptor),
+      eventStore: inMemoryEventStore(),
+      commandBus,
+      queryBus: localQueryBus(unitOfWork),
+    },
+  ],
+})
+```
+
+A handler that appends an event with a payload its own schema rejects fails in the call to `ctx.append`, before the event reaches the store. `ctx.append`, `ctx.schedule` and `ctx.scheduleAfter` cannot wait for an asynchronous schema and throw an error that names the message type, so use a schema that validates synchronously for those. `validatingHandler` composes with the other wrappers in any order.
+
+### Errors the caller receives
+
+A failed validation throws a plain `Error` whose message is `validate: "<qualified name>" failed validation — <issues>`. A validation failure is not a command result. A business refusal that the caller acts on belongs in a result, and a payload that does not match its schema is a bug or a hostile input, which the caller can only report.
+
+The handler never runs when the inbound payload is rejected, and no events are appended. The caller of `send` gets a rejected promise carrying the error:
+
+```ts
+try {
+  await send(commandBus, RegisterCustomer, { customerId: 7 } as never)
+} catch (error) {
+  console.log((error as Error).message)
+}
+```
+
+```text
+validate: "toolstore.RegisterCustomer" failed validation — Invalid input: expected string, received number; Invalid input: expected string, received undefined
+```
+
+A failure on a message the handler created has the same shape and names the descriptor of that message, not the command. For an event handler, the error fails the processor's batch and is retried or dead-lettered as described in [Event processors](/docs/kronos-ts/event-processors).
+
+## Errors
+
+- An intercept that throws rejects the send with that error. No handler is called.
+- A failed validation throws the error shown above, from `validate` where you call it and from `validatingHandler` inside the handler.
+- A wrapper chain that cannot work is rejected when `kronos()` boots, as [Assembly](/docs/kronos-ts/assembly#boot-errors) shows.
+
+## Related
+
+- [Observability](/docs/kronos-ts/observability) documents `correlation`, `correlatingHandler`, `loggingHandler` and the OTLP wrapper.
+- [Assembly](/docs/kronos-ts/assembly) shows where entries take wrapped handlers and buses.
+- [Messages](/docs/kronos-ts/messages) covers descriptors, payload schemas and metadata.
+- [Commands](/docs/kronos-ts/commands) covers command results and the handler context.
+- [Event processors](/docs/kronos-ts/event-processors) covers what happens when an event handler throws.

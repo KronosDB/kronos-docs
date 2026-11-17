@@ -1,0 +1,97 @@
+---
+title: Contexts
+description: Logical event stores on one KronosDB server, how to declare them in a manifest or create them through the admin API, and how they are isolated.
+---
+
+A context is a named event store inside a KronosDB server. Each context has its own log, its own positions starting at 0, its own snapshots and schedules, and a consistency condition matches only the events of the context it is evaluated in. One server holds as many contexts as you create, which lets several applications, or several environments of one application, share a server and a cluster without sharing a log.
+
+A server always has a context named `default`, which it creates at startup. Every other context is created by name, either declared in a manifest file or created at runtime through the admin API. Messaging does not use contexts: [buses](/docs/kronosdb/messaging#buses) are a separate set of names.
+
+## Naming
+
+A context name has between 1 and 128 characters, and each character is an ASCII letter, a digit, a hyphen or an underscore. Names are case-sensitive. A tool store would use `toolstore`, and an application with one context per tenant could use `toolstore-acme`.
+
+A name that breaks the rule is rejected with HTTP status 400 when created through the admin API, and stops the server from starting when it is in the manifest.
+
+## The manifest
+
+A manifest is a TOML file that lists the contexts a server must have. The server creates every context in it that does not exist yet, and keeps the file under watch while it runs.
+
+```toml
+# kronosdb-manifest.toml
+[[contexts]]
+name = "toolstore"
+
+[[contexts]]
+name = "toolstore-reporting"
+```
+
+The server looks for the manifest in this order, and uses the first one it finds:
+
+1. The `--manifest` flag.
+2. The `KRONOSDB_MANIFEST` environment variable.
+3. The `manifest` key in the TOML configuration file, for example `manifest = "/etc/kronosdb/manifest.toml"`.
+4. A file named `kronosdb-manifest.toml` in the server's working directory.
+
+At startup the server creates the declared contexts that are missing before it starts serving. While it runs, it reads the file every 10 seconds, so a file replaced by a symlink swap, as a Kubernetes ConfigMap update does, is noticed. A context added to the file is created within one interval and served as soon as it exists, without a restart. A file that does not parse is logged as a warning and the server keeps the contexts it has.
+
+Applying a manifest only adds. A context that is already there is left untouched, so applying the same manifest again changes nothing. When a context disappears from the file, the server logs that the manifest does not declare it any more, and the context keeps serving without being deleted.
+
+In a cluster, give every node the same manifest. A manifest update that reaches the nodes at different times still creates each context once.
+
+## Creating through the admin API
+
+A context can also be created at runtime with a `POST` to the admin API, which the server replicates to every node in the cluster:
+
+```sh
+curl -X POST http://127.0.0.1:9240/api/contexts \
+  -H 'Authorization: Bearer <admin token>' \
+  -H 'Content-Type: application/json' \
+  -d '{"name": "toolstore"}'
+```
+
+The server replies with `{"status":"ok","context":"toolstore"}`. Creating a context that already exists also succeeds and changes nothing, and an invalid name returns status 400 with the reason in the body. The `Authorization` header is needed when the admin port has authentication turned on, which is covered in [Security](/docs/kronosdb/security). The admin console has a form that does the same, and `kronos contexts create toolstore` creates a context from the command line, while `kronos contexts ls` lists the existing ones.
+
+A context created through the API and one declared in a manifest are the same thing. Removing a name from the manifest does not affect a context created through the API, and the API does not write the manifest.
+
+## Using a context
+
+A client is configured with the name of the context it uses, and a connection can use several, for example an application that writes events to `toolstore` and a report job that reads from `toolstore-reporting`. A client that names a context that does not exist fails with `not_found`.
+
+A principal's grants can name contexts by glob, so a token can be limited to `toolstore-*`. The server checks the principal's rights before it looks for the context, so a failed request does not reveal whether a context exists, as [Security](/docs/kronosdb/security) describes for grants.
+
+## Isolation
+
+Contexts share the server's process, its ports and its cluster membership, and they share nothing beyond those. Specifically:
+
+- Each context has its own writer and its own group commit, so a busy context does not delay the fsync of another, apart from the disk they share.
+- Positions are per context. Position 100 in `toolstore` and position 100 in `toolstore-reporting` are unrelated events, and a consistency marker is only meaningful in the context it came from.
+- An append goes to one context. There is no append that writes to two contexts atomically, and a condition cannot refer to another context's events.
+- Each context is stored in its own directory under the data directory, and `kronosdb_data_dir_bytes` on `/metrics` reports the size per context.
+
+A server therefore suits several applications that must not read each other's events, but it does not isolate their load from each other beyond that. Applications with independent availability needs belong on separate clusters.
+
+## Removing a context
+
+KronosDB has no request, API call or flag that deletes a context. The log only grows, and a context that a manifest stops declaring stays loaded and keeps serving.
+
+## Options
+
+| Option | Where | Default | Purpose |
+| --- | --- | --- | --- |
+| `manifest` | `--manifest`, `KRONOSDB_MANIFEST`, `manifest` in `kronosdb.toml` | `./kronosdb-manifest.toml` if it exists | The manifest file to apply and watch. |
+
+## Errors
+
+| Failure | When |
+| --- | --- |
+| `not_found` | A client names a context that does not exist. |
+| `permission_denied` | The principal has no grant for the context. |
+| HTTP 400 | The admin API could not create the context: the name is empty, over 128 characters or has characters other than letters, digits, hyphens and underscores, or a cluster that cannot commit the change at the moment. The body carries the reason. |
+
+## Related
+
+- [Events and tags](/docs/kronosdb/events-and-tags) describes what a context stores.
+- [Clustering and replication](/docs/kronosdb/replication) explains how contexts replicate.
+- [Configuration](/docs/kronosdb/configuration) lists the server options.
+- [Security](/docs/kronosdb/security) covers the grants that limit a principal to some contexts.

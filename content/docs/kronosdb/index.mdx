@@ -1,0 +1,59 @@
+---
+title: Overview
+description: What KronosDB is, the parts it is made of, its ports and what it keeps.
+---
+
+KronosDB is an event store and a messaging server in one binary. The event store keeps an append-only log of events for event sourcing, with tag-based queries and conditional appends that implement dynamic consistency boundaries (DCB). The messaging server delivers commands and queries to handlers registered by the processes of an application. Clients reach both on the same TCP port, the client port described under Ports below.
+
+An event in KronosDB has a type, a payload and a set of tags, such as a tool id or a customer id. A client reads the events matching a query, decides, and appends new events with a condition. The events the client read are the consistency boundary of its decision, and the append fails if an event matching the same query was stored after the position the client read. There are no streams or aggregates to declare in advance, because each decision selects its own boundary with a query, as described in [Events and tags](/docs/kronosdb/events-and-tags#conditional-appends).
+
+## The parts
+
+| Part | What it is | Page |
+| --- | --- | --- |
+| Event store | The log of events in a context: events, tags, positions, reading by query, streaming from a position, and conditional appends with their durability. | [Events and tags](/docs/kronosdb/events-and-tags) |
+| Contexts | Separate event stores on one server, each with its own log and positions, declared in a manifest or created through the admin API. | [Contexts](/docs/kronosdb/contexts) |
+| Messaging | Named buses with a command bus, a query bus and subscription queries, independent of contexts. | [Messaging](/docs/kronosdb/messaging) |
+| Clustering and replication | Copies of the log on several nodes, a leader that takes all appends, and the consistency a cluster gives. | [Clustering and replication](/docs/kronosdb/replication) |
+| Admin console and API | A web console and a JSON API on a second port, for contexts, clients, processors and cluster membership. | [Admin console](/docs/kronosdb/admin-console) |
+
+Snapshots and scheduled events are part of the event store. A snapshot is a state blob a client stores under a key so that it can start a read from the snapshot's position, and a schedule makes the server append an event at a future time.
+
+## Clients
+
+An application reaches KronosDB through a client library. The `kronos` command line tool is a client too. Run without arguments it opens a terminal UI, and its subcommands such as `kronos events tail -f` and `kronos contexts ls` print JSON with `-o json`.
+
+| Client | Language | Use |
+| --- | --- | --- |
+| `@kronos-ts/kronosdb` | TypeScript | The event store and buses of [Kronos](/docs/kronos-ts/infrastructure/kronosdb). |
+| `kronosdb-client` | Rust | A client library in the server repository, used by the `kronos` CLI. |
+| `axon-kronosdb-connector` | Java | Connects Axon Framework 5.3 and later applications, version 0.6 or later for KronosDB 0.11 or later. |
+
+Client authors find the protocol schema at [github.com/KronosDB/kronosdb/tree/main/protocol](https://github.com/KronosDB/kronosdb/tree/main/protocol).
+
+## Ports
+
+The server listens on two ports.
+
+| Port | Default | Serves |
+| --- | --- | --- |
+| Client | `127.0.0.1:50051` | Clients and, in a cluster, the other nodes. TLS when a certificate and key are configured. |
+| Admin | `127.0.0.1:9240` | The admin console, the JSON API, `/health`, `/ready` and `/metrics`. |
+
+Starting and configuring a server is covered in [Getting started](/docs/kronosdb/getting-started) and [Configuration](/docs/kronosdb/configuration).
+
+## What it keeps
+
+The event log only grows. The server has no retention setting and no call that deletes events or a context.
+
+Messages on the buses are transient. A command or query for which no handler is registered is not stored for later, because the events a handler appends are the durable record. Payloads of events, commands and queries are bytes the server does not interpret, so the schema and serialization format belong to the clients.
+
+A single node is a cluster of one, and it acknowledges an append when its own log is durable. Adding nodes changes where the data is copied to and how many nodes must have an append before it is acknowledged, and the client is configured the same way.
+
+Measurements of the server and the conditions they were taken under are in [`docs/BENCHMARKS.md`](https://github.com/KronosDB/kronosdb/blob/main/docs/BENCHMARKS.md) in the repository.
+
+## Related
+
+- [Events and tags](/docs/kronosdb/events-and-tags) defines events, tags, conditional appends and durability.
+- [Run KronosDB](/docs/kronosdb/getting-started) starts a node.
+- [Kronos and KronosDB](/docs/kronos-ts/infrastructure/kronosdb) shows the TypeScript client.

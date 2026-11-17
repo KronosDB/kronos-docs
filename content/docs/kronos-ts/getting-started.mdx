@@ -1,0 +1,324 @@
+---
+title: Getting started
+description: Build a small in-memory tool store with Kronos, from the first command to a query that shows the inventory.
+---
+
+In this tutorial you build a tool store that rents tools to customers. It records tools and customers, refuses a rental that breaks a rule, and keeps an inventory you can query. Everything runs in memory in one script, and the tutorial takes about fifteen minutes. You need [Bun](https://bun.sh) installed and no prior knowledge of Kronos.
+
+## Create the project
+
+Create a directory, initialize it, and install Kronos and a schema library. Kronos accepts any [Standard Schema](https://standardschema.dev) library; this tutorial uses zod.
+
+```sh
+mkdir toolstore && cd toolstore
+bun init -y
+bun add @kronos-ts/core zod
+```
+
+## Declare the messages
+
+A Kronos application declares three kinds of message: commands request a change, events record a change that happened, and queries request data. Each is declared once as a descriptor with a name and a payload schema. Create `messages.ts` and start with the first command and the event it produces:
+
+```ts
+import { withNamespace } from "@kronos-ts/core"
+import { z } from "zod"
+
+const ns = withNamespace("toolstore")
+
+export const AddTool = ns.command("AddTool", {
+  payload: z.object({ toolId: z.string(), model: z.string(), name: z.string() }),
+})
+
+export const ToolAdded = ns.event("ToolAdded", {
+  payload: z.object({ toolId: z.string(), model: z.string(), name: z.string() }),
+  tags: { toolId: (payload) => payload.toolId },
+})
+```
+
+`withNamespace("toolstore")` gives every message the qualified name `toolstore.<Name>`. The `tags` record on `ToolAdded` gives the event one tag, `toolId`, taken from its payload. Kronos selects the events a decision depends on by tag, and [Messages](/docs/kronos-ts/messages) describes them in full.
+
+Add the customer messages in the same file:
+
+```ts
+export const RegisterCustomer = ns.command("RegisterCustomer", {
+  payload: z.object({ customerId: z.string(), name: z.string(), maxRentals: z.number() }),
+})
+
+export const CustomerRegistered = ns.event("CustomerRegistered", {
+  payload: z.object({ customerId: z.string(), name: z.string(), maxRentals: z.number() }),
+  tags: { customerId: (payload) => payload.customerId },
+})
+```
+
+Renting a tool is a command that can be refused for business reasons, so its descriptor declares a `result`. The handler returns either `{ rented: true }` or `{ rented: false, reason }`, and the caller receives exactly that. A successful rental records `ToolRented`, tagged with both the tool and the customer:
+
+```ts
+export const RentTool = ns.command("RentTool", {
+  payload: z.object({ toolId: z.string(), customerId: z.string() }),
+  result: z.discriminatedUnion("rented", [
+    z.object({ rented: z.literal(true) }),
+    z.object({
+      rented: z.literal(false),
+      reason: z.enum(["tool-unavailable", "customer-unknown", "over-limit"]),
+    }),
+  ]),
+})
+
+export const ToolRented = ns.event("ToolRented", {
+  payload: z.object({ toolId: z.string(), customerId: z.string() }),
+  tags: {
+    toolId: (payload) => payload.toolId,
+    customerId: (payload) => payload.customerId,
+  },
+})
+```
+
+Finally the query the counter screen will use:
+
+```ts
+export const GetInventory = ns.query("GetInventory", {
+  payload: z.object({}),
+  result: z.array(z.object({ toolId: z.string(), name: z.string(), available: z.boolean() })),
+})
+```
+
+## Add tools
+
+A command handler receives a command, loads the state it needs to decide, and appends events. A state is a fold over events: an initial value and one function per event type that changes it. Create `tool.ts` with a `Tool` state that records whether a tool exists, and a handler that refuses to add it twice:
+
+```ts
+import { commandHandler, state } from "@kronos-ts/core"
+import { z } from "zod"
+import { AddTool, ToolAdded } from "./messages"
+
+export const Tool = state({
+  id: { toolId: z.string() },
+  tags: (id) => ({ toolId: id.toolId }),
+  evolve: [
+    () => ({ exists: false }),
+    [ToolAdded, (tool) => ({ ...tool, exists: true })],
+  ],
+})
+
+export const addTool = commandHandler(AddTool, async ({ payload }, ctx) => {
+  const tool = await ctx.load(Tool, { toolId: payload.toolId })
+  if (tool.exists) throw new Error(`tool ${payload.toolId} already exists`)
+  ctx.append(ToolAdded, payload)
+})
+```
+
+`ctx.load` reads the events tagged with the given `toolId` and folds them through `evolve`. `ctx.append` records an event when the handler finishes, and only if no other `ToolAdded` for the same tool was stored after the state was loaded. Adding a tool twice is a bug in the caller, not a business outcome, so the handler throws. [State and consistency](/docs/kronos-ts/state) explains the check, and [Commands](/docs/kronos-ts/commands) covers handlers.
+
+## Register customers
+
+Registering a customer follows the same pattern with a `Customer` state keyed by `customerId`. Create `customer.ts`:
+
+```ts
+import { commandHandler, state } from "@kronos-ts/core"
+import { z } from "zod"
+import { CustomerRegistered, RegisterCustomer } from "./messages"
+
+export const Customer = state({
+  id: { customerId: z.string() },
+  tags: (id) => ({ customerId: id.customerId }),
+  evolve: [
+    () => ({ registered: false }),
+    [CustomerRegistered, (customer) => ({ ...customer, registered: true })],
+  ],
+})
+
+export const registerCustomer = commandHandler(RegisterCustomer, async ({ payload }, ctx) => {
+  const customer = await ctx.load(Customer, { customerId: payload.customerId })
+  if (customer.registered) throw new Error(`customer ${payload.customerId} already exists`)
+  ctx.append(CustomerRegistered, payload)
+})
+```
+
+## Rent a tool
+
+Renting depends on facts about two things at once: whether the tool exists and is out, and whether the customer is registered and how many tools they already have. A state can be identified by more than one field. `Renting` is identified by `toolId` and `customerId`, so loading it reads the events about that tool and about that customer, and the append fails if either set changed in the meantime. The state in `renting.ts` records the data of each event:
+
+```ts
+import { commandHandler, state } from "@kronos-ts/core"
+import { z } from "zod"
+import { CustomerRegistered, RentTool, ToolAdded, ToolRented } from "./messages"
+
+type Rental = { toolId: string; customerId: string }
+
+type RentingState = {
+  toolAdded: boolean
+  customerRegistered: boolean
+  maxRentals: number
+  rentals: Rental[]
+}
+
+export const Renting = state({
+  id: { toolId: z.string(), customerId: z.string() },
+  tags: (id) => ({ toolId: id.toolId, customerId: id.customerId }),
+  evolve: [
+    (): RentingState => ({ toolAdded: false, customerRegistered: false, maxRentals: 0, rentals: [] }),
+    [ToolAdded, (renting) => ({ ...renting, toolAdded: true })],
+    [
+      CustomerRegistered,
+      (renting, { payload }) => ({ ...renting, customerRegistered: true, maxRentals: payload.maxRentals }),
+    ],
+    [
+      ToolRented,
+      (renting, { payload }) => ({
+        ...renting,
+        rentals: [...renting.rentals, { toolId: payload.toolId, customerId: payload.customerId }],
+      }),
+    ],
+  ],
+})
+```
+
+The state keeps every rental it has seen, whether it is of this tool or by this customer, and applies no rules, which are in the handler:
+
+```ts
+export const rentTool = commandHandler(RentTool, async ({ payload }, ctx) => {
+  const renting = await ctx.load(Renting, { toolId: payload.toolId, customerId: payload.customerId })
+
+  const toolIsOut = renting.rentals.some((rental) => rental.toolId === payload.toolId)
+  const customerRentals = renting.rentals.filter((rental) => rental.customerId === payload.customerId)
+
+  if (!renting.toolAdded || toolIsOut) return { rented: false, reason: "tool-unavailable" }
+  if (!renting.customerRegistered) return { rented: false, reason: "customer-unknown" }
+  if (customerRentals.length >= renting.maxRentals) return { rented: false, reason: "over-limit" }
+
+  ctx.append(ToolRented, payload)
+  return { rented: true }
+})
+```
+
+A refusal is returned as the command's result, and nothing is appended. The caller is expected to act on it, which is why it is a result and not an error; [Refuse a command](/docs/kronos-ts/guides/refusing-a-command) covers when to choose which.
+
+## Keep an inventory
+
+The counter screen needs a list of tools and whether each is available. Event handlers react to events after they are stored, and a query handler returns data from what they wrote. Create `inventory.ts` with an in-memory map, two event handlers that keep it current, and the query handler:
+
+```ts
+import { eventHandler, queryHandler } from "@kronos-ts/core"
+import { GetInventory, ToolAdded, ToolRented } from "./messages"
+
+const inventory = new Map<string, { toolId: string; name: string; available: boolean }>()
+
+export const recordAddedTool = eventHandler(ToolAdded, ({ payload }) => {
+  inventory.set(payload.toolId, { toolId: payload.toolId, name: payload.name, available: true })
+})
+
+export const recordRentedTool = eventHandler(ToolRented, ({ payload }) => {
+  const row = inventory.get(payload.toolId)
+  if (row) inventory.set(payload.toolId, { ...row, available: false })
+})
+
+export const getInventory = queryHandler(GetInventory, () => [...inventory.values()])
+```
+
+[Events](/docs/kronos-ts/events) and [Queries](/docs/kronos-ts/queries) describe these handlers.
+
+## Assemble the application
+
+The `kronos()` call connects the handlers to an event store, a command bus, a query bus and an event processor. The processor reads the event log in order and calls the handlers for each event. The call goes in `app.ts`, which also builds the stores and buses.
+
+```ts
+import {
+  eventProcessor,
+  inMemoryEventStore,
+  inMemoryTokenStore,
+  kronos,
+  localCommandBus,
+  localQueryBus,
+  unitOfWork,
+} from "@kronos-ts/core"
+import { addTool } from "./tool"
+import { registerCustomer } from "./customer"
+import { rentTool } from "./renting"
+import { getInventory, recordAddedTool, recordRentedTool } from "./inventory"
+
+export const eventStore = inMemoryEventStore()
+export const commandBus = localCommandBus(unitOfWork)
+export const queryBus = localQueryBus(unitOfWork)
+const inventoryView = eventProcessor("inventory-view", eventStore, inMemoryTokenStore(), unitOfWork)
+
+export const app = kronos({
+  commandHandlers: [
+    { ...addTool, eventStore, commandBus, queryBus },
+    { ...registerCustomer, eventStore, commandBus, queryBus },
+    { ...rentTool, eventStore, commandBus, queryBus },
+  ],
+  eventHandlers: [
+    { ...recordAddedTool, commandBus, queryBus, processor: inventoryView },
+    { ...recordRentedTool, commandBus, queryBus, processor: inventoryView },
+  ],
+  queryHandlers: [{ ...getInventory, queryBus }],
+})
+```
+
+The two event handlers name the same `inventoryView` processor. Every store and bus here is in memory; [Assembly](/docs/kronos-ts/assembly) shows what replaces them in production.
+
+## Run it
+
+Create `main.ts`. It sends commands with `send`, sends the query with `query`, and prints each result. Event handlers run asynchronously after a command finishes ([Event processors](/docs/kronos-ts/event-processors) describes this), so before it queries the inventory the script waits until the `inventory-view` processor has reached the end of the log.
+
+```ts
+import { query, send } from "@kronos-ts/core"
+import { app, commandBus, eventStore, queryBus } from "./app"
+import { AddTool, GetInventory, RegisterCustomer, RentTool } from "./messages"
+
+async function projectionsCaughtUp() {
+  const head = await eventStore.getHeadPosition()
+  const inventoryView = app.processors.get("inventory-view")!
+  while (inventoryView.position < head) await new Promise((resolve) => setTimeout(resolve, 5))
+}
+
+await send(commandBus, AddTool, { toolId: "t-1", model: "DCD791", name: "Cordless drill" })
+await send(commandBus, AddTool, { toolId: "t-2", model: "D24000", name: "Tile saw" })
+await send(commandBus, RegisterCustomer, { customerId: "ada", name: "Ada", maxRentals: 1 })
+
+console.log(JSON.stringify(await send(commandBus, RentTool, { toolId: "t-1", customerId: "ada" })))
+console.log(JSON.stringify(await send(commandBus, RentTool, { toolId: "t-1", customerId: "ada" })))
+console.log(JSON.stringify(await send(commandBus, RentTool, { toolId: "t-2", customerId: "ada" })))
+console.log(JSON.stringify(await send(commandBus, RentTool, { toolId: "t-2", customerId: "linus" })))
+
+await projectionsCaughtUp()
+console.log(JSON.stringify(await query(queryBus, GetInventory, {}), null, 2))
+
+await app.stop()
+```
+
+Run it:
+
+```sh
+bun run main.ts
+```
+
+The four rentals print the four possible outcomes in turn: Ada rents the drill, the drill is already out, Ada is at her limit of one, and Linus is not registered. The inventory then shows the drill as unavailable and the tile saw as available.
+
+```text
+{"rented":true}
+{"rented":false,"reason":"tool-unavailable"}
+{"rented":false,"reason":"over-limit"}
+{"rented":false,"reason":"customer-unknown"}
+[
+  {
+    "toolId": "t-1",
+    "name": "Cordless drill",
+    "available": false
+  },
+  {
+    "toolId": "t-2",
+    "name": "Tile saw",
+    "available": true
+  }
+]
+```
+
+## Where to go next
+
+The pages below follow from what you built. [What is Kronos](/docs/kronos-ts) lists every part and the steps Kronos takes to handle a command.
+
+- [Organize an app into slices](/docs/kronos-ts/guides/slices-and-modules) splits this code into one file per feature and groups the files into modules.
+- [Test a slice](/docs/kronos-ts/guides/testing-a-slice) writes tests for the renting rules with `@kronos-ts/test`.
+- [Running on Postgres](/docs/kronos-ts/guides/running-on-postgres) replaces the in-memory stores with a database.
+- [Messages](/docs/kronos-ts/messages), [State and consistency](/docs/kronos-ts/state) and [Commands](/docs/kronos-ts/commands) describe the parts used here in full.

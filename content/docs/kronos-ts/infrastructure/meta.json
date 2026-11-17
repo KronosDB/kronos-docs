@@ -1,0 +1,4 @@
+{
+  "title": "Infrastructure",
+  "pages": ["index", "postgres", "kronosdb", "axon-server", "rabbitmq"]
+}

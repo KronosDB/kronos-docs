@@ -1,0 +1,139 @@
+---
+title: Versioning
+description: How events change shape over time without rewriting the log, using event versions and upcasting.
+---
+
+Events are stored forever, so an event written last year is read by the code you deploy today. When the shape of an event changes, the stored events keep the old shape, and **upcasting** converts each one to the current shape as it is read. An upcast is a function from a stored event to an event, applied by an event store wrapper to everything that store returns. Handlers, states and processors receive only the current shape, and the log is never rewritten.
+
+In the tool store, `ToolAdded` first recorded a tool id, a model and a name. Later each tool gets a category. Every `ToolAdded` already in the log lacks the category, and every new one has it. This page declares the two shapes as two versions of one event, writes the upcast that turns the first into the second, and wraps the event store with it.
+
+## Event versions
+
+An event descriptor has a `version`, a string that defaults to `"1.0"`. When a handler appends an event, the version of the descriptor is stored with the event, and every read returns it on the event message. Commands and queries also have a `version` on their descriptors, but their messages are not stored and carry no version.
+
+The version is information for upcasts. Handlers and states are matched to events by name alone, and nothing compares the stored version with the descriptor's. An event stored as version 1.0 that reaches a handler declared for 2.0 arrives as it was stored: a field that 2.0 added is missing, and the payload is not validated against the 2.0 schema unless the handler is wrapped in `validatingHandler`. Upcasting is what brings stored events to the version the code expects.
+
+A change that stored events already satisfy needs no upcast. Adding an optional field to a payload schema is an example: old events lack the field and the code that reads it treats it as absent. A change that old events do not satisfy, such as a new required field, a field with a different type or a different name, or an event with a new name, needs an upcast.
+
+## Declaring the versions
+
+Declare the outdated version as a descriptor of its own, next to the current one. It has the same name and the old version and payload schema. Both are ordinary event descriptors, and the old one is used only by the upcast.
+
+```ts
+// The shape in the log: every ToolAdded written before tools had a category.
+export const ToolAddedV1 = ns.event("ToolAdded", {
+  version: "1.0",
+  payload: z.object({ toolId: z.string(), model: z.string(), name: z.string() }),
+  tags: { toolId: (payload) => payload.toolId },
+})
+
+// The shape the code uses today.
+export const ToolAdded = ns.event("ToolAdded", {
+  version: "2.0",
+  payload: z.object({ toolId: z.string(), model: z.string(), name: z.string(), category: z.string() }),
+  tags: { toolId: (payload) => payload.toolId },
+})
+```
+
+The current descriptor is the one that handlers, states and `ctx.append` use from now on. New events are stored as version 2.0.
+
+## Writing an upcast
+
+An `Upcast` takes an `EventMessage` and returns an `EventMessage`. It works on the message that handlers receive, with its payload, tags, metadata and timestamp, and not on the stored bytes. `is(event, descriptor)` is the test: it is true when the event has the name and the version of the descriptor, and it narrows `event.payload` to the schema of that descriptor. An upcast that does not apply to an event returns it unchanged.
+
+```ts
+export const addCategory: Upcast = (event) => {
+  if (is(event, ToolAddedV1)) {
+    return {
+      ...event,
+      version: ToolAdded.version,
+      payload: { ...event.payload, category: "uncategorized" },
+    }
+  }
+  return event
+}
+```
+
+The new version is read from the current descriptor, `ToolAdded.version`, so the number is written in one place. The payload is typed as the 1.0 shape inside the branch, so a misspelt field is a compile error. The function receives every event that the store reads, of every type, and the `is` test lets the others pass through. An upcast returns exactly one event for each event it receives: it cannot drop an event or turn one into several.
+
+Tags are not computed again. They are how the event was indexed when it was appended, and the reads that found it were matched against them, so an upcast that changed them would make the event disagree with the query that returned it. An upcast does not change an event's tags. A field that is added to a payload cannot become a tag for events that were stored without it.
+
+### Several versions
+
+Compose upcasts as functions, in order from the oldest version. Each one handles one step and returns every other event unchanged, so an event is converted by the step that matches its stored version and by each later step, and the result has the current version.
+
+```ts
+// Oldest step first. An event is converted starting at the step that matches its stored version.
+const upcast: Upcast = (event) => toolAddedV3(toolAddedV2(event))
+```
+
+## Wrapping the event store
+
+`upcastingEventStore(store, upcast, options?)` returns a store of the same type as the one it wraps, with every read passed through the upcast. You wrap the store where the application is assembled, and handlers, states and processors use the wrapped store.
+
+```ts
+const log = inMemoryEventStore()
+const eventStore = upcastingEventStore(log, addCategory)
+```
+
+Reads by states and by processors both go through the upcast. Appends go to the wrapped store as they are, and a snapshotting or scheduling store inside the wrapper keeps working.
+
+### What is stored
+
+Nothing about the stored events changes. The event is in the log as version 1.0 for as long as the log exists, and every read converts it again. Changing an upcast takes effect on the next read of every event, with nothing to migrate. Keep an upcast a pure function of the event, with no I/O and no clock, because it runs on every read of an old event.
+
+A handler wrapped in `validatingHandler` checks its payload against the current schema, and it receives the event after the upcast, so a 1.0 event is validated in its 2.0 form. [Interception and validation](/docs/kronos-ts/interception-and-validation) covers `validatingHandler`.
+
+## Renaming an event
+
+An upcast can change the name of an event as well as its payload. The log keeps the name that each event was written under, and the code uses the current name, so a reader that filters by type needs the list of stored names that upcast to the current name.
+
+```ts
+export const lapsedRentals: Upcast = (event) =>
+  event.name.namespace === storedName.namespace && event.name.name === storedName.name
+    ? { ...event, name: RentalLapsed.name, version: RentalLapsed.version }
+    : event
+
+export const storedTypes = (type: string) =>
+  type === "toolstore.RentalLapsed" ? [type, "toolstore.RentalOverdue"] : [type]
+```
+
+The example renames `RentalOverdue` to `RentalLapsed`. The `storedTypes` option of `upcastingEventStore` receives a type that a stream requests and returns the stored names that upcast to it, the type itself included when events are still written under it. A processor that handles `RentalLapsed` opens its stream for that name, and the wrapper queries the log for both names.
+
+```ts
+const eventStore = upcastingEventStore(log, lapsedRentals, { storedTypes })
+```
+
+Without `storedTypes`, a processor still receives every event it handles, but the store cannot filter the log by type, so the processor reads and discards more events. An upcast that changes only the version or the payload keeps the name, and `(type) => [type]` is the value for it, which keeps the type filter.
+
+The option applies to processors. A state reads only the event names of its own evolvers, so a state that folds `RentalLapsed` does not read the events stored as `RentalOverdue`. To make the state read both, list the old descriptor as an evolver as well. The upcast turns the old events into `RentalLapsed` events, and the fold applies the `RentalLapsed` evolver to them.
+
+```ts
+export const Lapse = state({
+  id: { toolId: z.string() },
+  tags: (id) => ({ toolId: id.toolId }),
+  evolve: [
+    () => ({ lapsed: false }),
+    [RentalLapsed, (lapse) => ({ ...lapse, lapsed: true })],
+    [RentalOverdue, (lapse) => lapse],
+  ],
+})
+```
+
+## Snapshots and read models
+
+A snapshot holds a state folded before the change, and the upcast does not convert it. If the upcast changes what an old event means to a state, change that snapshot's key, as described on [Snapshots](/docs/kronos-ts/snapshots).
+
+A read model that an event handler built before the change keeps what the handler wrote then. To rebuild it from the converted events, reset the processor and replay it, as described on [Event processors](/docs/kronos-ts/event-processors).
+
+## Errors
+
+An upcast that throws fails the read that reached the event: the command that loaded a state fails, and a processor handles it as any handler failure. An event with no upcast and the wrong shape for the code reaches the handler as stored, and nothing reports it unless the handler is wrapped in `validatingHandler`.
+
+## Related
+
+- [Messages](/docs/kronos-ts/messages) declares event descriptors and their tags.
+- [State and consistency](/docs/kronos-ts/state) explains how a state selects its events.
+- [Snapshots](/docs/kronos-ts/snapshots) covers snapshot keys and the order of store wrappers.
+- [Event processors](/docs/kronos-ts/event-processors) covers replaying a read model.
+- [Changing an event](/docs/kronos-ts/guides/changing-an-event) walks through a change from the first version to a replayed read model.

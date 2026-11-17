@@ -1,0 +1,199 @@
+---
+title: KronosDB
+description: The @kronos-ts/kronosdb package connects a Kronos application to a KronosDB server for its event store, snapshots, schedules, command bus, query bus and processor administration.
+---
+
+`@kronos-ts/kronosdb` is the client for [KronosDB](/docs/kronosdb). It provides an event store, snapshot and scheduling tiers on top of that store, a command bus and a query bus that route through the server, and a control plane through which the server administers your event processors. Each piece is a plain function over one shared connection, so an application that only needs the event store builds only the event store.
+
+The client needs a server that implements native protocol version 2 (KronosDB 0.12 or later). It connects over TCP, or over TLS on the same port.
+
+## Connecting
+
+`kronosDbConnection` creates the connection handle. It does not touch the network: the socket opens when the first store or bus is used, and opens again after it closes unexpectedly. Every store and bus built from the handle shares that one socket.
+
+```ts
+const kdb = await kronosDbConnection({
+  componentName: "toolstore-counter",
+  serializer: jsonSerializer(),
+  host: "kronosdb.internal",
+  port: 50051,
+  context: "toolstore",
+  token,
+})
+```
+
+`componentName` identifies the application in the KronosDB admin console, and `serializer` encodes every payload this client sends: events, snapshots, scheduled events, command payloads and query results. A payload the serializer cannot encode fails the call that carries it.
+
+## Composition
+
+Stores and buses are functions of the handle. Build them, assemble the application with `kronos()`, and call `kdb.start()` once:
+
+```ts
+const eventStore = kronosDbSchedulingEventStore(
+  kronosDbSnapshottingEventStore(kronosDbEventStore(kdb, "toolstore"), kdb, "toolstore"),
+  kdb,
+  "toolstore",
+)
+const commandBus = kronosDbCommandBus(localCommandBus(unitOfWork), kdb, "toolstore")
+const queryBus = kronosDbQueryBus(localQueryBus(unitOfWork), kdb, "toolstore")
+
+const app = kronos({
+  commandHandlers: [{ ...addTool, eventStore, commandBus, queryBus }],
+  queryHandlers: [{ ...getInventory, eventStore, queryBus }],
+})
+
+await kdb.start()
+```
+
+`kdb.start()` has to run after `kronos()`, because `kronos()` subscribes the handlers and each subscription registers the handler name with the server. `start()` waits until the server has acknowledged every handler, so a command dispatched right after it is routable. It waits at most `startTimeoutMs`, and repeated calls return the same promise.
+
+| Function | Provides |
+| --- | --- |
+| `kronosDbEventStore` | The event store of [State and consistency](/docs/kronos-ts/state) over one context. |
+| `kronosDbSnapshottingEventStore` | Snapshot storage for states that declare a [snapshot policy](/docs/kronos-ts/snapshots). Wraps a store. |
+| `kronosDbSchedulingEventStore` | [Scheduling](/docs/kronos-ts/scheduling), kept by the server. Wraps a store. |
+| `kronosDbCommandBus`, `kronosDbQueryBus` | Buses that route through the server. Wrap a local bus. |
+| `kronosDbControlPlane` | Lets the server administer your event processors. Optional. |
+
+Events read back carry their `tags`. A dispatch always goes to the server, even for a command this process handles. To handle such a command locally, wrap the bus in `localFirstCommandBus(bus, local)` or `localFirstQueryBus(bus, local)`. Wrap the outermost bus in `interceptingCommandBus(bus, correlation)` so the intercept runs before the message is serialized.
+
+## Contexts and bus names
+
+A context is a string that selects an event log on the server. `kronosDbEventStore(kdb, "toolstore")` and `kronosDbEventStore(kdb, "billing")` share the one socket and read different logs. A store with no context argument uses the connection's `context`. [Contexts](/docs/kronosdb/contexts) explains what a context holds on the server.
+
+The command and query buses take a bus name instead of a context, as their third argument, which defaults to `"default"`. A bus name addresses the server's messaging, which is separate from its event logs. The examples name the bus after the context; that is a choice you make at the call site. [Messaging](/docs/kronosdb/messaging) describes what a bus is on the server.
+
+Handlers announce themselves under the connection's `clientId`. A restarted process that keeps its `clientId` replaces its previous registration. Two buses built for the same bus name on one connection are both kept.
+
+## Scheduling and snapshots
+
+The server stores schedules and appends the event when it is due. A schedule is durable once `schedule()` resolves, it fires once across a leader failover, and a schedule that came due while the server was down fires on recovery. Scheduling does not join the caller's unit of work: a handler that schedules an event and then throws has still armed the schedule.
+
+`cancelSchedule` returns `cancelled`, `already-appended` or `not-found`. `scheduleIdempotent(event, at, token)` takes a token you choose, so a retried call throws `ScheduleAlreadyExistsError` instead of arming a second schedule. `listSchedules` returns the pending schedules, soonest first. Scheduling and cancelling must reach the cluster leader, so a follower returns an `unavailable` error and the caller retries.
+
+```ts
+const eventStore = kronosDbSchedulingEventStore(kronosDbEventStore(kdb, "toolstore"), kdb, "toolstore")
+const pending = await eventStore.listSchedules()
+return pending.map((schedule) => `${schedule.token} fires ${new Date(schedule.dueAt).toISOString()}`)
+```
+
+A snapshot is written after the transaction it summarizes commits. A write that does not land costs a longer replay on the next load, and the load stays correct.
+
+## Subscription queries
+
+`subscriptionQuery` on the query bus returns the initial result, then the updates handlers emit with `ctx.emitUpdate`.
+
+```ts
+const watching = subscriptionQuery(queryBus, GetCustomerRentals, { customerId: "ada" })
+console.log("initial:", await watching.initialResult)
+
+for await (const toolIds of watching.updates) {
+  console.log("rented now:", toolIds)
+  break
+}
+
+watching.close()
+```
+
+`emitUpdate` runs after the unit of work commits, and not at all if it rolls back. A bus holds at most 1024 subscriptions it opened and 1024 it serves. A subscription is not a durable feed: it ends when the socket does, and the subscriber has to query and subscribe again. Use an event processor for changes that must not be missed.
+
+## Control plane
+
+The server can pause and start the event processors of a connected client, split, merge and release their segments, and show their status in the admin console. This is opt-in through `kronosDbControlPlane`. Create it before `kdb.start()`, so every instruction has a handler when it arrives.
+
+```ts
+const control = kronosDbControlPlane(kdb, app.processors)
+await kdb.start()
+```
+
+A processor that throws on an instruction, for example splitting a segment that does not exist, is reported to the server as failed with the error's message. An instruction for an unknown processor changes nothing. Segments are described on the [event processors page](/docs/kronos-ts/event-processors), and an instruction for one applies to that processor only.
+
+## Options
+
+<TypeTable
+  type={{
+    componentName: { type: "string", description: "Name of this application, shown in the admin console. Required." },
+    serializer: { type: "Serializer", description: "Encodes payloads for the wire. Required." },
+    host: { type: "string", default: '"localhost"', description: "Host of the server." },
+    port: { type: "number", default: "50051", description: "The server's listen port. TCP and TLS share it." },
+    servers: { type: "string[]", description: 'Addresses as "host:port", for a cluster. Overrides host and port. The client tries them in order, starting from the last one that worked.' },
+    context: { type: "string", default: '"default"', description: "Context a store addresses when its context argument is left out." },
+    clientId: { type: "string", default: "a random UUID", description: "Identifies this process to the server." },
+    token: { type: "string", default: "none", description: "Access token or JWT. Leave it out for an open server or a TLS client certificate." },
+    ssl: { type: "{ enabled: boolean; certFile?: string; clientCertFile?: string; clientKeyFile?: string }", description: "TLS. certFile is the CA to trust, as a PEM file; the client certificate and key are for mutual TLS. The files are read once, when the connection is created." },
+    connectTimeoutMs: { type: "number", default: "10000", description: "Time allowed to connect and finish the handshake, per server." },
+    reconnectIntervalMs: { type: "number", default: "2000", description: "Base delay between reconnection attempts. It doubles per attempt up to 30000." },
+    maxReconnectAttempts: { type: "number", default: "0", description: "Attempts before reconnecting gives up. 0 retries without limit." },
+    startTimeoutMs: { type: "number", default: "30000", description: "How long start() waits for the server to acknowledge this client's handlers." },
+    shutdownTimeoutMs: { type: "number", default: "30000", description: "How long close() waits for in-flight messaging to drain before it closes the socket anyway." },
+  }}
+/>
+
+The command and query buses take an options object as their fourth argument:
+
+<TypeTable
+  type={{
+    timeoutMs: { type: "number", default: "30000", description: "Client-side deadline for a dispatch. For queries it is also sent to the server as the query's timeout." },
+    loadFactor: { type: "number", default: "100", description: "Relative share of routed commands this instance receives. 50 receives about half as many as the default. Commands only." },
+    limits: { type: "{ maxConcurrentHandlers?: number; maxPendingRequests?: number }", default: "128 and 1024", description: "Inbound handlers running at once, and outbound requests awaiting a response. Excess requests fail with MessagingOverloadedError." },
+  }}
+/>
+
+A command's metadata can carry `processingInstructions` with a `routingKey`, a `priority` and a `timeoutMs`. Commands with the same routing key go to the same handler. Two concurrent dispatches on one bus with the same message identifier fail, so use a fresh identifier for each.
+
+## When the connection drops
+
+The client opens a new socket on the next request after one dies, trying the configured servers in order. A request in flight on the lost socket fails with `ConnectionFailedError`, and the client does not send it again. A command or query that failed this way may or may not have run, so the caller decides whether to send it again, and handlers should be idempotent.
+
+Handler registrations are restored without action from you. Each handler stream reopens, registers its names again and resumes, retrying with growing delays and logging each retry with `console.warn`. A subscription an event processor reads ends with an error, and the processor reopens it from its stored token. A subscription query ends, and the subscriber has to subscribe again.
+
+A bad token fails with `AuthenticationError` at once and is not retried against another server. A server that announces it is shutting down keeps serving the streams already open and gets no new work.
+
+## Shutdown
+
+Stop the application first, then close the handle.
+
+```ts
+await app.stop()
+await kdb.close()
+```
+
+`kdb.close()` rejects new dispatches with `ShutdownInProgressError`, ends the subscriptions this process opened, and waits for running handlers to finish. It waits at most `shutdownTimeoutMs`. If the work has not drained by then, `close()` rejects with an `UnavailableError`, and in either case it closes the socket. Work still running after the timeout continues in this process, and its result is discarded. Call `await control.close()` before `kdb.close()` if you created a control plane.
+
+## Errors
+
+Check errors with the guards from `@kronos-ts/core`, not with `instanceof`: an application can hold two copies of core, and the guards read the error's `kind`.
+
+```ts
+if (isConflict(error)) return "conflict"
+if (isNoHandler(error)) return "nobody-handles-it"
+if (isUnavailable(error)) return "try-again-later"
+if (error instanceof AuthenticationError) return "bad-token"
+if (error instanceof KronosDbRequestError) return `refused:${error.status}`
+if (error instanceof KronosDbError) return `kronosdb:${error.errorCode}`
+```
+
+| What happened | What the caller receives | What to do |
+| --- | --- | --- |
+| An append's condition was violated; nothing was written | `ConcurrencyError` (`isConflict`) | Load the state again and decide again. |
+| Nothing handles the command or query | `NoHandlerForCommandError` or `NoHandlerForQueryError` (`isNoHandler`) | Check that the handling process called `kdb.start()` on the same bus name. |
+| The socket was lost, would not connect, or the handshake timed out | `ConnectionFailedError` (`isUnavailable`) | Retry. The request may have run. |
+| The server is not ready, is failing over, or a follower rejected a schedule write | `KronosDbRequestError` with status `unavailable` (`isUnavailable`) | Retry. |
+| The deadline passed | `UnavailableError`, "Messaging deadline exceeded after Nms" (`isUnavailable`) | Retry. The command may still have run. |
+| A bus is at `maxConcurrentHandlers` or `maxPendingRequests` | `MessagingOverloadedError` (`isUnavailable`) | Retry later, or raise the limits. |
+| The connection is closing | `ShutdownInProgressError` (`isUnavailable`) | Stop dispatching. |
+| A handler on another instance threw anything else | `CommandExecutionError` or `QueryExecutionError` with the remote message | Report it. |
+| The token is missing or wrong | `AuthenticationError` | Fix the token. |
+| A schedule token is already in use | `ScheduleAlreadyExistsError` | The earlier call armed it. |
+| Any other rejection | `KronosDbRequestError` with the server's `status` | Report it. |
+
+`kdb.start()` rejects with `UnavailableError` ("Handler registration timed out after Nms") when the server does not acknowledge the handlers in time, and with a `KronosDbError` when the server rejects a registration. A subscription query fails its update iterator with `UnavailableError` when the initial result takes longer than `timeoutMs` or the bus is shutting down.
+
+## Related
+
+- [KronosDB](/docs/kronosdb) is the server this package talks to.
+- [State and consistency](/docs/kronos-ts/state) covers the event store contract, markers and conditional appends.
+- [Event processors](/docs/kronos-ts/event-processors) covers segments, tokens and replays.
+- [Scheduling](/docs/kronos-ts/scheduling) and [Snapshots](/docs/kronos-ts/snapshots) cover what a handler does with the two tiers.
+- [Commands](/docs/kronos-ts/commands) and [Queries](/docs/kronos-ts/queries) cover dispatching and handling on any bus.
+- [Running on KronosDB](/docs/kronos-ts/guides/running-on-kronosdb) walks through a deployment.

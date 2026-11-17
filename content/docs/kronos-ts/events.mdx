@@ -1,0 +1,141 @@
+---
+title: Events
+description: How event handlers react to stored events, what they receive and what they can call.
+---
+
+An **event handler** is a function that Kronos calls with an event after the event has been stored. Handlers do the work that follows an event: they keep a read model up to date, which a query handler can then return data from, or they send a command in response to the event. A handler cannot prevent the event, because the event is already in the log when the handler runs.
+
+A handler does not run inside the command that appended the event. An [event processor](/docs/kronos-ts/event-processors) reads the log in order, calls the handlers registered for each event and stores the position it reached. This page covers the handler: its declaration, what it receives, what it can call and how several handlers share an event. The processor, with its batches, retries and replays, is on its own page.
+
+## Declaring a handler
+
+`eventHandler(descriptor, handler)` pairs an event descriptor with a function. The function receives the event message and a context, and returns nothing or a promise. The three handlers below update the inventory read model from the events about tools: a new tool is available, a rented tool is not, a returned tool is again.
+
+```ts
+export const recordAddedTool = eventHandler(ToolAdded, ({ payload }) => {
+  inventory.set(payload.toolId, { toolId: payload.toolId, name: payload.name, available: true })
+})
+
+export const markRented = eventHandler(ToolRented, ({ payload }) => {
+  const row = inventory.get(payload.toolId)
+  if (row) row.available = false
+})
+
+export const markReturned = eventHandler(ToolReturned, ({ payload }) => {
+  const row = inventory.get(payload.toolId)
+  if (row) row.available = true
+})
+```
+
+The payload is typed from the descriptor's schema. Nothing is delivered to it until it is placed in the `eventHandlers` list of `kronos()` with a processor, as described under [Attaching a handler to a processor](#attaching-a-handler-to-a-processor).
+
+An event handler is registered for one event name. A handler for a name receives every event of that name, whatever its version, and is not called for any other event. To react to several event types, declare one handler per type.
+
+## The event message
+
+The first parameter is the event as it was stored, plus its position in the log.
+
+| Member | Meaning |
+| --- | --- |
+| `kind` | Always `"event"`. |
+| `identifier` | The unique id of this event. |
+| `name` | The qualified name, `{ namespace, name }`, for example `toolstore.ToolRented`. |
+| `version` | The version string of the descriptor the event was appended with. |
+| `payload` | The event's data, typed from the descriptor's schema. |
+| `metadata` | The key-value metadata the event was appended with, such as a correlation id. |
+| `timestamp` | When the event was created, in milliseconds since the epoch. Always present on a stored event. |
+| `tags` | The tags the event carries, as `{ key, value }` entries. |
+| `sequence` | The event's position in the log, as a `bigint`. |
+
+Events carry the tags the descriptor declared, as covered in [Messages](/docs/kronos-ts/messages). A handler that needs the tag values reads them from `tags`; a handler that needs the identity of the thing the event is about usually reads it from the payload.
+
+## The handler context
+
+The second parameter is the handler context. It is usable only while the handler runs, so every call a handler makes has to be awaited before the handler returns. A handler may be a plain function or `async`; make it `async` only when it awaits something.
+
+| Member | What it does |
+| --- | --- |
+| `ctx.load(state, id)` | Loads a state and returns it, read from the entry's `eventStore` when it has one and from the processor's event store otherwise. |
+| `ctx.source(query)` | Runs an event query against the same store and returns the matching events, to fold yourself. |
+| `ctx.send(command, payload, metadata?)` | Dispatches a command through the entry's command bus and resolves to the command's result. |
+| `ctx.query(query, payload, metadata?)` | Dispatches a query through the entry's query bus and resolves to the handler's result. |
+| `ctx.isReplay()` | Returns `true` while the processor is replaying history, and `false` for events it is handling for the first time. |
+
+`ctx.load` and `ctx.source` are the same reads a command handler uses, covered in [State and consistency](/docs/kronos-ts/state). `ctx.send` and `ctx.query` need the buses named on the entry, which is why every entry in `eventHandlers` carries a `commandBus` and a `queryBus`.
+
+The context has more members when the entry's store or bus supports them: `ctx.schedule`, `ctx.scheduleAfter` and `ctx.cancelSchedule` with a scheduling store ([Scheduling](/docs/kronos-ts/scheduling)), and `ctx.emitUpdate` with a subscription-capable query bus ([Queries](/docs/kronos-ts/queries)). A handler that uses one types its context as `EventHandlerContext & ScheduleCapability` or `EventHandlerContext & SubscriptionCapability`. The `@kronos-ts/postgres` package adds `ctx.sql()`, covered on the [Postgres page](/docs/kronos-ts/infrastructure/postgres).
+
+### Reacting with a command
+
+An event handler has no `append`. A handler that reacts to an event by producing new events does it by sending a command, and the command handler appends them. The command handler is still the one place that loads state, decides and appends under a condition.
+
+The handler below runs when a rental becomes overdue. It loads the customer's suspension, and if the customer is not suspended yet it sends `SuspendCustomer`.
+
+```ts
+export const suspendOnOverdue = eventHandler(RentalOverdue, async ({ payload }, ctx) => {
+  if (ctx.isReplay()) return
+  const suspension = await ctx.load(Suspension, { customerId: payload.customerId })
+  if (suspension.suspended) return
+  await ctx.send(SuspendCustomer, {
+    customerId: payload.customerId,
+    reason: `tool ${payload.toolId} is overdue`,
+  })
+})
+```
+
+`ctx.send` resolves to what the command handler returned, and rejects if the command handler threw. A command that the command handler refuses as a business outcome is returned as its result, and the event handler has to handle it. Metadata on the triggering event is not copied onto the command; pass the metadata to copy as the third argument, or wrap the handler with the correlation helper described in [Observability](/docs/kronos-ts/observability).
+
+### Replays
+
+`ctx.isReplay()` returns whether the current event is a replay. A processor that is reset to an earlier position handles old events again, and `isReplay()` is `true` for those events and `false` for every event after the position the processor had reached before the reset. The handler above returns early on a replay, because replaying history must not send commands again. A handler that only writes a read model needs no check, because replaying it rebuilds the model. How a reset works is described in [Event processors](/docs/kronos-ts/event-processors#reset-and-replay).
+
+## Several handlers for one event
+
+More than one handler can be registered for the same event type. When the handlers are attached to the same processor, the processor calls them for each event in the order they appear in the `eventHandlers` list, each with its own context. The handler below counts added tools by model. It is attached to the same processor as `recordAddedTool`, so both run for every `ToolAdded`.
+
+```ts
+export const countAddedModels = eventHandler(ToolAdded, ({ payload }) => {
+  addedPerModel.set(payload.model, (addedPerModel.get(payload.model) ?? 0) + 1)
+})
+```
+
+Handlers attached to the same processor share one position and one batch. If one of them throws, the handlers after it do not run for that event, and the batch fails as a whole, as described in [Event processors](/docs/kronos-ts/event-processors#retries-and-backoff). Handlers attached to different processors are independent deliveries. Each processor keeps its own position, runs at its own pace and can be reset without the other. Attach handlers that must process the same events at the same position, such as the handlers that write one read model, to one processor.
+
+## Attaching a handler to a processor
+
+A handler is delivered events when it is listed in `kronos({ eventHandlers })`. Each entry is the handler spread together with the infrastructure it uses: the `commandBus` behind `ctx.send`, the `queryBus` behind `ctx.query`, and the `processor` that delivers events to it. An entry may also carry an `eventStore`, which `ctx.load` reads from and which decides which capability members the context has. Without one, `ctx.load` reads from the processor's event store.
+
+```ts
+const eventStore = inMemoryEventStore()
+const commandBus = localCommandBus(unitOfWork)
+const queryBus = localQueryBus(unitOfWork)
+const inventoryView = eventProcessor("inventory-view", eventStore, inMemoryTokenStore(), unitOfWork)
+const rentalDeadlines = eventProcessor("rental-deadlines", eventStore, inMemoryTokenStore(), unitOfWork)
+
+const app = kronos({
+  commandHandlers: [{ ...suspendCustomer, eventStore, commandBus, queryBus }],
+  eventHandlers: [
+    { ...recordAddedTool, commandBus, queryBus, processor: inventoryView },
+    { ...countAddedModels, commandBus, queryBus, processor: inventoryView },
+    { ...markRented, commandBus, queryBus, processor: inventoryView },
+    { ...markReturned, commandBus, queryBus, processor: inventoryView },
+    { ...suspendOnOverdue, commandBus, queryBus, processor: rentalDeadlines },
+  ],
+})
+```
+
+Entries that name a processor with the same `name` are one delivery, so the four inventory handlers above share the processor `inventory-view`. A handler with no `processor` is a boot error from `kronos()`, because nothing would deliver to it. [Assembly](/docs/kronos-ts/assembly) covers how entries share stores and processors.
+
+## Errors
+
+A handler that throws, or returns a promise that rejects, fails the event. Without a dead-letter queue the processor rolls back the batch, leaves its position where it was and delivers the batch again after a delay. With one, the event and the rest of its sequence are parked and the batch commits. Both are described in [Event processors](/docs/kronos-ts/event-processors#retries-and-backoff). A handler should therefore keep its writes inside the batch's transaction, or make them safe to repeat.
+
+`ctx.send` rejects with whatever the command handler threw, for example an append conflict, and the event handler fails with it unless it catches the error. A refusal the command handler returns as a result does not reject. A context call made after the handler has returned, for instance from a promise the handler did not await, throws `NoActiveUnitOfWork`.
+
+## Related
+
+- [Event processors](/docs/kronos-ts/event-processors) reads the log, delivers events to handlers and records its position.
+- [Messages](/docs/kronos-ts/messages) declares event descriptors, tags and metadata.
+- [Commands](/docs/kronos-ts/commands) covers the handler that `ctx.send` reaches.
+- [Queries](/docs/kronos-ts/queries) covers the read side that event handlers keep up to date.
+- [Assembly](/docs/kronos-ts/assembly) covers the `kronos()` call and its entries.

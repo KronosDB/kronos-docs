@@ -1,0 +1,167 @@
+---
+title: Overview
+description: What Kronos is, its parts, and the steps Kronos takes to handle a command.
+---
+
+Kronos is a TypeScript framework for building event-sourced applications. An
+event-sourced application records every change as an event in an append-only
+log, and works out the current state of anything by reading the events about
+it. Kronos gives you the pieces to declare those events, decide which ones to
+record, keep read models up to date from them, and handle queries.
+
+Kronos models consistency with dynamic consistency boundaries (DCB). A
+decision, such as whether a customer may rent a tool, is made from a set of
+events, and that set is the decision's consistency boundary. Each event
+carries tags naming what it is about, such as a tool id or a customer id, and
+each decision selects its events by type and tag. Renting a tool depends on
+the events about that tool and the events about that customer, so its boundary
+spans both. The events a decision produces are stored only if the events in
+its boundary are still the ones it was made from, as described in [State and
+consistency](/docs/kronos-ts/state).
+
+## The parts
+
+| Part | What it is | Page |
+| --- | --- | --- |
+| Messages | Commands, events and queries, each declared once as a descriptor with a name and a payload schema. Events also declare their tags. | [Messages](/docs/kronos-ts/messages) |
+| Command handlers | Functions that receive a command, load the state they need, decide, and append events. | [Commands](/docs/kronos-ts/commands) |
+| States | Declarations of a fold over events: which events to read, and how each one changes the state. A command handler loads a state to make a decision. | [State and consistency](/docs/kronos-ts/state) |
+| Event store | The log. It stores events, returns the events matching a query, and appends conditionally. | [State and consistency](/docs/kronos-ts/state) |
+| Event handlers | Functions that react to events after they are stored, to update a read model or to send a command. | [Events](/docs/kronos-ts/events) |
+| Event processors | Components that read the log in order, call the event handlers for each event, and store the position they reached. | [Event processors](/docs/kronos-ts/event-processors) |
+| Query handlers | Functions that return the result of a query, usually from a read model. | [Queries](/docs/kronos-ts/queries) |
+| Buses | The command bus and query bus route a message to its handler, in the same process or across processes. | [Commands](/docs/kronos-ts/commands), [Queries](/docs/kronos-ts/queries) |
+| Assembly | The `kronos()` call that connects handlers to stores, buses and processors and starts them. | [Assembly](/docs/kronos-ts/assembly) |
+
+Everything in this table is in `@kronos-ts/core`, with an in-memory
+implementation of every store and bus. Other packages provide persistent
+stores and remote buses with the same types, listed on
+[Infrastructure](/docs/kronos-ts/infrastructure).
+
+## A small application
+
+The example below is a tool store that records new tools and lists them. It
+has one command, one event, one query, a state recording whether a tool
+exists, and an in-memory read model of the inventory.
+
+```ts
+const ns = withNamespace("toolstore")
+
+export const AddTool = ns.command("AddTool", {
+  payload: z.object({ toolId: z.string(), model: z.string(), name: z.string() }),
+})
+
+export const ToolAdded = ns.event("ToolAdded", {
+  payload: z.object({ toolId: z.string(), model: z.string(), name: z.string() }),
+  tags: { toolId: (payload) => payload.toolId },
+})
+
+export const GetInventory = ns.query("GetInventory", {
+  payload: z.object({}),
+  result: z.array(z.object({ toolId: z.string(), name: z.string(), available: z.boolean() })),
+})
+```
+
+Each descriptor has a qualified name (`toolstore.AddTool`) and a payload
+schema. Kronos accepts any [Standard Schema](https://standardschema.dev)
+library; these examples use zod. The `tags` record on `ToolAdded` gives the
+event one tag, `toolId`, taken from its payload.
+
+The command handler decides whether to add the tool. It loads the `Tool`
+state, which is built from the events tagged with that `toolId`, and refuses a
+duplicate:
+
+```ts
+export const Tool = state({
+  id: { toolId: z.string() },
+  tags: (id) => ({ toolId: id.toolId }),
+  evolve: [
+    () => ({ exists: false }),
+    [ToolAdded, (tool) => ({ ...tool, exists: true })],
+  ],
+})
+
+export const addTool = commandHandler(AddTool, async ({ payload }, ctx) => {
+  const tool = await ctx.load(Tool, { toolId: payload.toolId })
+  if (tool.exists) throw new Error(`tool ${payload.toolId} already exists`)
+  ctx.append(ToolAdded, payload)
+})
+```
+
+The read side is an event handler that writes each new tool into a map, and a
+query handler that returns the map's contents:
+
+```ts
+const inventory = new Map<string, { toolId: string; name: string; available: boolean }>()
+
+export const recordAddedTool = eventHandler(ToolAdded, ({ payload }) => {
+  inventory.set(payload.toolId, { toolId: payload.toolId, name: payload.name, available: true })
+})
+
+export const getInventory = queryHandler(GetInventory, () => [...inventory.values()])
+```
+
+Finally, assembly. Each handler entry names the store and buses it uses, and
+the event handler names the processor that delivers events to it:
+
+```ts
+const eventStore = inMemoryEventStore()
+const commandBus = localCommandBus(unitOfWork)
+const queryBus = localQueryBus(unitOfWork)
+const inventoryView = eventProcessor("inventory-view", eventStore, inMemoryTokenStore(), unitOfWork)
+
+const app = kronos({
+  commandHandlers: [{ ...addTool, eventStore, commandBus, queryBus }],
+  eventHandlers: [{ ...recordAddedTool, commandBus, queryBus, processor: inventoryView }],
+  queryHandlers: [{ ...getInventory, queryBus }],
+})
+
+await send(commandBus, AddTool, { toolId: "t-1", model: "DCD791", name: "Cordless drill" })
+const tools = await query(queryBus, GetInventory, {})
+```
+
+`kronos()` subscribes the handlers to their buses and starts the processor.
+`send` and `query` dispatch a message on a bus and return the value the
+handler returned. Replacing the in-memory store and buses with Postgres, KronosDB or
+RabbitMQ changes the assembly lines and leaves the handlers as they are.
+
+## How a command is handled
+
+When `send(commandBus, AddTool, payload)` runs:
+
+1. The command bus calls the handler registered for `toolstore.AddTool`.
+2. `ctx.load(Tool, { toolId })` reads the events tagged with that `toolId` and
+   folds them into the `Tool` state.
+3. `ctx.append(ToolAdded, payload)` records the event to be stored when the
+   handler returns.
+4. When the handler returns, Kronos stores the event, on the condition that no
+   new event tagged with that `toolId` was stored since step 2. If one was,
+   nothing is stored and `send` rejects with a conflict, which you can retry.
+5. `send` returns the handler's result. If the handler throws, nothing is
+   stored and `send` rejects with that error.
+
+Afterwards the `inventory-view` processor reads the new event from the log and
+calls `recordAddedTool`. This happens asynchronously, so a query sent
+immediately after a command can return a read model that does not include the
+new event yet, as described in [Event
+processors](/docs/kronos-ts/event-processors).
+
+## Packages
+
+| Package | Contains |
+| --- | --- |
+| `@kronos-ts/core` | Everything on this page, with in-memory stores and local buses. |
+| `@kronos-ts/postgres` | Event store, token store, dead-letter queue, scheduling and snapshots on Postgres, plus transactions shared with your own tables. |
+| `@kronos-ts/kronosdb` | Event store and command, query and subscription buses on [KronosDB](/docs/kronosdb). |
+| `@kronos-ts/axon-server` | Event store and buses on Axon Server. |
+| `@kronos-ts/rabbitmq` | Command and query buses across processes over RabbitMQ. |
+| `@kronos-ts/otlp` | Traces, metrics and logs exported over OTLP. |
+| `@kronos-ts/test` | Given/when/then scenarios against an assembled application. |
+
+Every package is an ES module and runs on Bun and on Node.js.
+
+## Related
+
+- [Getting started](/docs/kronos-ts/getting-started) builds a first application step by step.
+- [State and consistency](/docs/kronos-ts/state) explains tags, states and conditional appends.
+- [Assembly](/docs/kronos-ts/assembly) covers `kronos()` and how entries share stores and processors.

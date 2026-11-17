@@ -1,0 +1,34 @@
+{
+  "lockfileVersion": 1,
+  "configVersion": 1,
+  "workspaces": {
+    "": {
+      "name": "kronos-docs-examples",
+      "dependencies": {
+        "@kronos-ts/core": "0.3.0",
+        "@kronos-ts/otlp": "0.3.0",
+        "@kronos-ts/postgres": "0.11.0",
+        "@kronos-ts/test": "0.4.0",
+        "zod": "^4.0.0",
+      },
+      "devDependencies": {
+        "typescript": "^5.9.0",
+      },
+    },
+  },
+  "packages": {
+    "@kronos-ts/core": ["@kronos-ts/core@0.3.0", "", { "dependencies": { "uuid": "^11" } }, "sha512-nL+TL5uwVj0c8uz07UTPQyf4YLHUrpClntxksghFUirvYKlk4nPkn+0tRoBjRkKRVnK2/M73M/VmJUfrkqvOrg=="],
+
+    "@kronos-ts/otlp": ["@kronos-ts/otlp@0.3.0", "", { "dependencies": { "@kronos-ts/core": "0.3.0" } }, "sha512-ntysy82Kf73Ns22jihdYnRaRJ0iUE4eAbDJ2veJ7hesHy7pBm1vTVa2cLmnX8pSscBZmq4p5uBhE1xQUQ71CKQ=="],
+
+    "@kronos-ts/postgres": ["@kronos-ts/postgres@0.11.0", "", { "dependencies": { "@kronos-ts/core": "0.3.0" }, "peerDependencies": { "pg": ">=8.0.0", "postgres": ">=3.0.0" }, "optionalPeers": ["pg", "postgres"] }, "sha512-8GC+TMZVk4+6wZaM9QCAdBF/BELlmiGSGYbJWqw9DMkf2gy55N1vhOt4ByhE4S4j8dKuP09FaI9B2Yhf4cyYxg=="],
+
+    "@kronos-ts/test": ["@kronos-ts/test@0.4.0", "", { "dependencies": { "@kronos-ts/core": "0.3.0" } }, "sha512-BG0XgP+dXrq/FKHYCFqcrZ9qe6sNWRzxIZisI45Q32YOq4TIuhMdpN2GezmPwOiVYwsC2uhyItwPT814xr0l6w=="],
+
+    "typescript": ["typescript@5.9.3", "", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw=="],
+
+    "uuid": ["uuid@11.1.1", "", { "bin": { "uuid": "dist/esm/bin/uuid" } }, "sha512-vIYxrBCC/N/K+Js3qSN88go7kIfNPssr/hHCesKCQNAjmgvYS2oqr69kIufEG+O4+PfezOH4EbIeHCfFov8ZgQ=="],
+
+    "zod": ["zod@4.4.3", "", {}, "sha512-ytENFjIJFl2UwYglde2jchW2Hwm4GJFLDiSXWdTrJQBIN9Fcyp7n4DhxJEiWNAJMV1/BqWfW/kkg71UDcHJyTQ=="],
+  }
+}

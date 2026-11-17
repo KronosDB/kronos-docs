@@ -1,0 +1,232 @@
+---
+title: State and consistency
+description: The event log, the states a command handler builds from it, and the conflicts that protect each decision.
+---
+
+The event store is an ordered log of events, each carrying tags. A state is the result of folding the events that match a query on their types and tags. A command handler loads the states it needs, decides, and appends new events. The events a handler loaded are the consistency boundary of its decision, and the append is conditional on them: it fails if an event matching the handler's query was appended after the handler read. This approach is called dynamic consistency boundaries (DCB).
+
+Events are declared on the [Messages](/docs/kronos-ts/messages) page, and command handlers that load state and append events are on the [Commands](/docs/kronos-ts/commands) page. Everything here is exported from `@kronos-ts/core`. Event handlers and processors read the same log in order, as described on [Events](/docs/kronos-ts/events) and [Event processors](/docs/kronos-ts/event-processors).
+
+## The log
+
+The event store holds every event the application has appended, in the order they were appended. Each event has a position, a type name, a payload, metadata, and a set of tags. A tag is a key and a string value, such as `toolId` and `t-1`, produced from the event's payload by the `tags` record on its descriptor. Positions are `bigint` values that increase with every append.
+
+For the tool store, a short log looks like this:
+
+| Position | Event | Tags |
+| --- | --- | --- |
+| 0 | `ToolAdded` | `toolId=t-1` |
+| 1 | `CustomerRegistered` | `customerId=ada` |
+| 2 | `ToolRented` | `toolId=t-1`, `customerId=ada` |
+| 3 | `ToolReturned` | `toolId=t-1`, `customerId=ada` |
+
+A read returns the events that match a query. Reading everything about tool `t-1` is a query on the tag `toolId=t-1`: it returns the events at positions 0, 2 and 3, in position order, together with a **consistency marker** that records the position the read reached. A later append passes that marker in its condition.
+
+## Dynamic consistency boundaries
+
+A decision is consistent when it is made from all the events it depends on. Renting tool `t-1` to Ada depends on three facts: the tool has been added and is not rented out, Ada is registered, and Ada has fewer rentals than her limit. The first fact comes from the events about the tool and the other two from the events about Ada. The set of events a decision depends on is its **consistency boundary**.
+
+With DCB, each decision defines its boundary as a query over event types and tags when it is made. Renting `t-1` to Ada reads the events tagged `toolId=t-1` and the events tagged `customerId=ada`. Renting `t-2` to Linus reads a different set. Events are not grouped into streams or aggregates beforehand, and one event can be inside the boundaries of many decisions: `ToolRented`, tagged with a tool and a customer, is inside every decision about that tool and every decision about that customer.
+
+The append that records a decision carries its boundary as the condition: the query the handler read and the consistency marker that read returned. The store writes the events only if no event matching the query has a position after the marker. If one does, the boundary now holds an event the decision was not made from, so the append fails with a conflict, and nothing is written. Handling the command again loads the current events and decides from them, for example by refusing because the tool is now rented.
+
+## Declaring a state
+
+A state declares a fold: which events to read for one identity, and how each event changes a value. A command handler loads the state it needs and decides from the result. This is the `Tool` state, which records whether a tool with a given id has been added:
+
+```ts
+export const Tool = state({
+  id: { toolId: z.string() },
+  tags: (id) => ({ toolId: id.toolId }),
+  evolve: [
+    () => ({ exists: false }),
+    [ToolAdded, (tool) => ({ ...tool, exists: true })],
+  ],
+})
+```
+
+`id` is a record from field names to schemas, from any Standard Schema library. The schemas give the id its type and its field names. Kronos does not parse an id when you load, so the value you pass is used as given.
+
+`tags` takes the id and returns the tags that scope the state, as a record of strings. Every value must be a string, so an id field that is not a string needs converting here. Kronos reads the events that carry these tags and whose types appear in `evolve`.
+
+`evolve` is one list. Its first element is the initial state, a function that returns the value the fold starts from. The remaining elements are pairs of an event descriptor and an evolver, a function that takes the state so far and an event message and returns the next state. The type of the state is inferred from the initial state, and each evolver is checked against its own event: in `[ToolAdded, (tool) => ...]` the message payload has the payload type of `ToolAdded`.
+
+The initial state may ignore the id or read it. Reading it is useful when the state carries its own key. An evolver receives the whole event message, so besides `payload` it can read `metadata`, `tags` and `timestamp`, and it may return a promise of the next state.
+
+```ts
+export const CustomerRentals = state({
+  id: { customerId: z.string() },
+  tags: (id) => ({ customerId: id.customerId }),
+  evolve: [
+    (id) => ({ customerId: id.customerId, toolIds: [] as string[] }),
+    [
+      ToolRented,
+      (rentals, { payload }) => ({ ...rentals, toolIds: [...rentals.toolIds, payload.toolId] }),
+    ],
+    [
+      ToolReturned,
+      (rentals, { payload }) => ({
+        ...rentals,
+        toolIds: rentals.toolIds.filter((toolId) => toolId !== payload.toolId),
+      }),
+    ],
+  ],
+})
+```
+
+When an initial state leaves its type open, such as an empty array or a union, annotate the type once on the initial state and the evolvers take it from there:
+
+```ts
+type RentalLogState = { toolIds: string[]; lastReturned: string | undefined }
+
+export const RentalLog = state({
+  id: { customerId: z.string() },
+  tags: (id) => ({ customerId: id.customerId }),
+  evolve: [
+    (): RentalLogState => ({ toolIds: [], lastReturned: undefined }),
+    [ToolRented, (log, { payload }) => ({ ...log, toolIds: [...log.toolIds, payload.toolId] })],
+    [ToolReturned, (log, { payload }) => ({ ...log, lastReturned: payload.toolId })],
+  ],
+})
+```
+
+An event the query returns that has no evolver is skipped. If two pairs name the same event type, only the first runs. `state()` throws when it is defined if the state has neither tags nor evolvers, or if an evolver's event shares no tag key with the state, because that evolver could never receive an event. The message names the evolver and the tags involved.
+
+## Loading a state
+
+A command handler loads a state with `ctx.load(state, id)`. The call reads the matching events from the event store attached to the handler's entry, folds them from the initial state, and returns the result. When no event matches, the result is the initial state. The read also becomes the condition of the handler's append: when the handler returns, its appended events are written only if no event matching what it loaded has been stored since.
+
+Within one command, loading the same state with the same id twice returns the first result without reading the store again, and ids are compared structurally, so key order does not matter. After `ctx.append`, the appended events are folded into every state already loaded in that command. A state that has not been loaded yet reads the store, which does not hold the appended events yet, so it does not include them. Event handlers have `ctx.load` as well, but only a command handler appends, so only a command handler's reads become a condition.
+
+## A state over two ids
+
+A decision often depends on more than one thing. Renting a tool depends on the tool being available, on the customer being registered, and on how many tools the customer holds. The `Renting` state spans both ids, so one load reads all of it:
+
+```ts
+export const Renting = state({
+  id: { toolId: z.string(), customerId: z.string() },
+  tags: (id) => ({ toolId: id.toolId, customerId: id.customerId }),
+  evolve: [
+    (id) => ({
+      toolId: id.toolId,
+      customerId: id.customerId,
+      toolAvailable: false,
+      customerRegistered: false,
+      rentals: 0,
+      maxRentals: 0,
+    }),
+    [ToolAdded, (renting) => ({ ...renting, toolAvailable: true })],
+    [
+      CustomerRegistered,
+      (renting, { payload }) => ({
+        ...renting,
+        customerRegistered: true,
+        maxRentals: payload.maxRentals,
+      }),
+    ],
+    [
+      ToolRented,
+      (renting, { payload }) => ({
+        ...renting,
+        toolAvailable: payload.toolId === renting.toolId ? false : renting.toolAvailable,
+        rentals: payload.customerId === renting.customerId ? renting.rentals + 1 : renting.rentals,
+      }),
+    ],
+    [
+      ToolReturned,
+      (renting, { payload }) => ({
+        ...renting,
+        toolAvailable: payload.toolId === renting.toolId ? true : renting.toolAvailable,
+        rentals: payload.customerId === renting.customerId ? renting.rentals - 1 : renting.rentals,
+      }),
+    ],
+  ],
+})
+```
+
+Kronos selects events for each tag a type declares. `ToolAdded` carries only `toolId`, so it is read by tool. `CustomerRegistered` carries only `customerId`, so it is read by customer. `ToolRented` declares both, so the fold receives every rental of this tool by any customer and every rental by this customer of any tool. The evolvers for `ToolRented` and `ToolReturned` compare the event's ids to the state's ids to determine which half of the state the event changes, and the initial state reads the id for exactly this reason.
+
+The handler loads once and decides:
+
+```ts
+export const rentTool = commandHandler(RentTool, async ({ payload }, ctx) => {
+  const renting = await ctx.load(Renting, payload)
+  if (!renting.customerRegistered) return { rented: false, reason: "customer-unknown" }
+  if (!renting.toolAvailable) return { rented: false, reason: "tool-unavailable" }
+  if (renting.rentals >= renting.maxRentals) return { rented: false, reason: "over-limit" }
+  ctx.append(ToolRented, payload)
+  return { rented: true }
+})
+```
+
+The decision depends on all of those events, and so does its append condition. A rental of a different tool by a different customer reads none of them and is not affected.
+
+## Conflicts
+
+Take two rentals of tool `t-1`, one by Ada and one by Linus, that both read the tool's events before either appends. The following code sends both at once. The second append finds the other's `ToolRented` after the position it read to, so it is rejected:
+
+```ts
+const sameTool = await Promise.allSettled([
+  send(commandBus, RentTool, { toolId: "t-1", customerId: "ada" }),
+  send(commandBus, RentTool, { toolId: "t-1", customerId: "linus" }),
+])
+
+for (const outcome of sameTool) {
+  if (outcome.status === "fulfilled") console.log("fulfilled", outcome.value)
+  else console.log("rejected", isConflict(outcome.reason), outcome.reason.message)
+}
+```
+
+```text
+fulfilled {
+  rented: true,
+}
+rejected true Append condition violated: 1 conflicting event(s) found after position 3
+```
+
+The same happens when one customer rents two different tools at once, because both decisions read the customer's rentals, which keeps a customer from exceeding the rental limit.
+
+A conflict means an event in the decision's boundary was stored after the handler read. Nothing from the failed command is written, including the other events it appended, and `send` rejects with an `AppendConditionError`. Test for it with `isConflict(error)` rather than `instanceof`, because an application can hold two copies of the core package, and the guard also recognizes a conflict that arrived from another process over a bus. The Postgres and KronosDB packages throw subclasses that `isConflict` accepts.
+
+A conflict is not a business refusal. The decision was not wrong, the events in its boundary changed after it was read, so the usual response is to run the command again: the new load reads the other writer's events and the handler decides again. Kronos does not retry on its own. [Commands](/docs/kronos-ts/commands) describes how a caller handles a failed command, and [Refusing a command](/docs/kronos-ts/guides/refusing-a-command) covers returning refusals as results.
+
+## Reading without a state
+
+`ctx.source(query)` reads events without a state. You write the query and fold the events yourself. It returns the matching events in order, and the read becomes part of the append condition exactly as `ctx.load` does, so an append in the same handler is conditioned on it. A query item has `tags`, which an event must all carry, and `types`, which lists the event types to match.
+
+```ts
+export const rentTool = commandHandler(RentTool, async ({ payload }, ctx) => {
+  const events = await ctx.source({
+    tags: { customerId: payload.customerId },
+    types: [ToolRented, ToolReturned],
+  })
+  const rented = events.filter((event) => is(event, ToolRented)).length
+  const returned = events.filter((event) => is(event, ToolReturned)).length
+  if (rented - returned >= MAX_RENTALS) return { rented: false }
+  ctx.append(ToolRented, payload)
+  return { rented: true }
+})
+```
+
+The append condition covers exactly the query you pass. Naming `types` limits it to those event types, and leaving `types` out extends it to every event carrying the tags, which produces more conflicts. A state selects the narrow form for you. `ctx.source` is not cached within the command, and it never uses snapshots, which are described on the [Snapshots](/docs/kronos-ts/snapshots) page.
+
+## Errors
+
+| Error | When | What to do |
+| --- | --- | --- |
+| `AppendConditionError` | An event in the decision's boundary was stored after the handler read. | `isConflict(error)` is true and nothing was written. Run the command again. |
+| Error from `state()` | The state has neither tags nor evolvers, or an evolver's event shares no tag key with the state. | Thrown when the state is defined. Fix the declaration. |
+| `ctx.load` or `ctx.source` without a store | The entry the handler runs on has no `eventStore`. | Attach the store to the entry, as the message names. |
+| `NoActiveUnitOfWork` | `ctx.load`, `ctx.source` or `ctx.append` is used after the handler has returned, for example from a promise it did not await. | Await every call before returning. |
+| `UnavailableError` | The store cannot serve the request now. | `isUnavailable(error)` is true. Retrying may succeed, and a command that returned no result may have taken effect. |
+
+Other store failures have no kind. They indicate a bug or a configuration problem, and retrying does not help. The failures specific to each store are on the infrastructure pages for [Postgres](/docs/kronos-ts/infrastructure/postgres), [KronosDB](/docs/kronos-ts/infrastructure/kronosdb) and [Axon Server](/docs/kronos-ts/infrastructure/axon-server).
+
+## Related
+
+- [Messages](/docs/kronos-ts/messages) declares events and the tags that states and queries match on.
+- [Commands](/docs/kronos-ts/commands) covers command handlers, results, handling a failed command and when appends are written.
+- [Snapshots](/docs/kronos-ts/snapshots) covers caching the result of a fold.
+- [Versioning](/docs/kronos-ts/versioning) covers converting old events when they are read.
+- [Event processors](/docs/kronos-ts/event-processors) covers how events reach handlers.
+- [Infrastructure](/docs/kronos-ts/infrastructure) lists the persistent stores.

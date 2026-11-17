@@ -1,0 +1,89 @@
+---
+title: Admin console
+description: The screens of the KronosDB admin console, the admin API operations and how they are authenticated.
+---
+
+The admin console is a web interface built into every KronosDB node, served on the admin port (9240 by default) next to a JSON API, the health and readiness probes and the Prometheus metrics endpoint. It shows the node it is open on: its contexts, the clients connected to it, the handlers and subscriptions registered with it, the event processors clients report, and the cluster membership, and its pages refresh themselves.
+
+The console shows the same data that the [monitoring](/docs/kronosdb/monitoring) endpoints expose as text, and the same port serves the operations that change a cluster. In a cluster each node serves its own console, and the data in it comes from that node alone. [Secure a server](/docs/kronosdb/security) covers turning authentication on, which is off by default.
+
+## Overview
+
+The landing page, which `/` redirects to. Four tiles show the node's uptime, the number of contexts, the total number of events across contexts, and the number of connected clients. Below them, a bar chart shows events appended per hour over the last 24 hours and starts empty after a restart, a table lists contexts with their event counts, and a table lists connected clients.
+
+## Contexts
+
+A table of the node's contexts with their head position, oldest retained position and event count, each linking to the Events page for that context. A form at the top creates a context from a name of letters, digits, hyphens and underscores. In a cluster, a context created here is replicated to every node.
+
+## Clients
+
+Every client connected to this node, with its client id, component name, library version, time connected, time since its last heartbeat, a health badge and whether it holds an active stream. The badge reads healthy up to 5 seconds since the last heartbeat, slow up to 15, and stale beyond.
+
+## Events
+
+A browser for the events of one context, newest first. Pick the context, filter by event name and by a tag as `key=value`, choose a page size of 25, 50, 100 or 200, and page back through the log. Each row opens to show the event's details. The page refreshes every three seconds while you are on the first page, and a Live toggle stops it.
+
+This page also lists the system events that clients cannot read. [Monitor a server](/docs/kronosdb/monitoring#look-at-system-events) describes them.
+
+## Commands and queries
+
+Two pages list the command types and query types registered with the node's buses. Selecting one shows its counters: dispatched, succeeded, failed, success rate, average latency, dispatches with no handler and dispatches with no flow-control permits. Below them is a table of the handlers for that type, with the component and client id of each, the number of permits it has left and, for commands, its load factor. A bus other than `default` is shown next to the name.
+
+## Subscriptions
+
+Open subscription queries, with their id, query type, bus, the subscribing client, the client that handles the query, and how long the subscription has been open.
+
+## Event processors
+
+The processors that clients report over their platform stream, with their mode (tracking or subscribing), segments, token position and status. The status is stopped, error, replaying, caught up or behind. A client reports its processors only if it implements this, as the TypeScript client does, described in [Infrastructure for KronosDB](/docs/kronos-ts/infrastructure/kronosdb).
+
+Streaming processors have buttons. Pause, Split and Merge show while any instance is running, and Start shows when none is. Each button sends an instruction to every client instance that runs the processor. Split divides the segment with the largest share of the stream. Merge instructs the clients to merge the smallest segment.
+
+## Cluster
+
+The node's id and type, whether clustering is configured, and a table of the peers from its configuration, voters and learners. When clustering is configured the page also has forms to add a learner, add a voter and remove a node. These call the membership endpoints below, and [Run a cluster](/docs/kronosdb/clustering#add-or-remove-a-voter) explains what they check. The table is the configured list, so use `GET /api/v1/cluster` for the live membership and leader.
+
+## Settings
+
+A read-only view of the node's effective configuration in five groups: server (name, addresses, data directory, version), storage (segment size, cache sizes, group commit), timeouts, cluster (node id, type, number of peers) and security (client authentication methods, TLS and CA state). Secrets are never shown.
+
+## Authentication
+
+The `[admin.auth] mode` setting chooses one of three behaviors. In `none`, which is the default, every endpoint is open. In `token`, a request needs the configured token, as `Authorization: Bearer <token>`, or a session. A browser reaches a sign-in form at `/auth/login`, or can start a session by opening any page with `?access_token=<token>`. In `oidc`, a browser is redirected to the identity provider and returns to `/auth/callback`, and API callers send a JWT from that provider as a bearer token.
+
+A console session lasts 480 minutes unless `session-ttl-minutes` sets another value. In `token` and `oidc` mode a bearer credential for the client port that resolves to a cluster-wide `admin` role is also accepted. The probes and the metrics need no credentials in any mode. The settings are listed under [Admin in the configuration reference](/docs/kronosdb/configuration#admin).
+
+## API
+
+The console is built on a JSON API on the same port. The endpoints an operator calls directly are the probes, the metrics and the operations below. `GET /api/v1/snapshot` returns the node, cluster, contexts, clients, commands, queries, subscriptions and processors in one response, and the other `GET /api/v1/` endpoints (`node`, `cluster`, `contexts`, `clients`, `commands`, `queries`, `subscriptions`, `processors` and `access`) return one part each. `GET /api/v1/cluster` returns the live membership and leader. None of them returns event payloads or secrets.
+
+| Method | Path | Body | Purpose |
+| --- | --- | --- | --- |
+| GET | `/health` | none | Liveness. Returns `ok`. |
+| GET | `/ready` | none | Readiness. 200 `ready`, or 503 when no leader can accept writes. |
+| GET | `/metrics` | none | Prometheus text format, described in [Monitor a server](/docs/kronosdb/monitoring#scrape-metrics). |
+| POST | `/api/contexts` | `{"name": "toolstore"}` | Create a context. Returns `{"status": "ok", "context": "toolstore"}`. |
+| POST | `/api/cluster/add-learner` | `{"id": 4, "addr": "node4:50051"}` | Add a non-voting node to the membership. |
+| POST | `/api/cluster/add-voter` | `{"id": 4, "addr": "node4:50051", "force": false}` | Add the node as a learner if needed, and promote it to voter once it is caught up. |
+| POST | `/api/cluster/remove-node` | `{"id": 4}` | Remove a voter from the membership. |
+| POST | `/api/processors/{name}/pause` | none | Pause the named processor on every client that runs it. |
+| POST | `/api/processors/{name}/start` | none | Start it. |
+| POST | `/api/processors/{name}/split` | none | Split its largest segment. |
+| POST | `/api/processors/{name}/merge` | none | Merge its smallest segment. |
+
+A processor action returns `{"ok": true, "sent": 2, "total": 2}`, where `sent` counts the clients that received the instruction.
+
+## Failures
+
+A request without valid credentials in `token` or `oidc` mode receives status 401 with a short message, and a request that accepts HTML is redirected to `/auth/login` instead.
+
+`POST /api/contexts` returns 400 with the reason when the name is invalid or the context cannot be created. `add-voter` and `remove-node` return 404 when the node has no Raft instance. All three cluster endpoints return 500 with the reason when the membership change fails, and `add-voter` also returns 409 when the request did not reach the node that holds the leader claim or the node is more than 1024 positions behind in some context. Pass `"force": true` to skip that check. A processor action returns `{"ok": false, "error": "no clients found for processor"}` when no connected client reports that name.
+
+The admin port has no TLS. Terminate it in a reverse proxy or a mesh when the console is reachable from outside a trusted network.
+
+## Related
+
+- [Secure a server](/docs/kronosdb/security): authentication modes.
+- [Monitor a server](/docs/kronosdb/monitoring): probes, metrics and logs.
+- [Run a cluster](/docs/kronosdb/clustering): the membership operations.
+- [Configuration](/docs/kronosdb/configuration): the admin settings.

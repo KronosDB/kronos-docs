@@ -1,0 +1,246 @@
+---
+title: Postgres
+description: The Postgres event store, token store, dead-letter queue, scheduling, snapshots and transactions in @kronos-ts/postgres.
+---
+
+`@kronos-ts/postgres` stores the event log, processor tokens, dead letters, schedules and snapshots in Postgres, and gives every unit of work a Postgres transaction that your own handler statements can join. It sends raw SQL to the database, so it has no ORM, and it needs Postgres 14 or later.
+
+You create one pool, start it, and pass it to each store and to the unit of work factory. The [overview of infrastructure](/docs/kronos-ts/infrastructure) shows how these combine with other packages, and the [Running on Postgres](/docs/kronos-ts/guides/running-on-postgres) guide walks through a complete setup.
+
+## Connect
+
+`postgresPool` takes a connection string and returns a pool. `start()` connects and creates the tables, and `close()` drains the pool on shutdown. Await `start()` before using the pool, because a statement sent earlier rejects with `postgresPool: no connection yet`.
+
+```ts
+// A connection string loads the `pg` driver when the pool starts.
+export const pg = postgresPool(connectionString)
+await pg.start()
+
+// Drain the pool on shutdown.
+await pg.close()
+```
+
+A connection string uses the `pg` driver (node-postgres), so install `pg` in your application. To use another driver, or to set the pool size, pass an adapter instead of a string. The package has an adapter for `pg` at `@kronos-ts/postgres/adapters/pg`, one for `postgres` (porsager) at `@kronos-ts/postgres/adapters/postgres`, and one for `Bun.SQL` at `@kronos-ts/postgres/adapters/bun-sql`. The [Running on Postgres](/docs/kronos-ts/guides/running-on-postgres) guide shows each one.
+
+## Schema
+
+`start()` creates five tables with `CREATE TABLE IF NOT EXISTS`. Several instances can start together. A table that already exists is never altered, so you migrate an existing table yourself.
+
+| Table | Default name | Holds |
+| --- | --- | --- |
+| Events | `kronos_events` | The event log |
+| Snapshots | `kronos_snapshots` | One cached state per snapshot key |
+| Scheduled | `kronos_scheduled_events` | Events waiting to be appended |
+| Tokens | `kronos_token_entries` | One row per processor segment |
+| Dead letters | `kronos_dead_letters` | Events parked by dead lettering |
+
+Set other names once with the pool's `tableNames` option, and every store built on the pool uses them. Use plain unqualified names, and select a schema through the connection's `search_path`.
+
+To create the tables with your own migration tool, pass `bootstrap: false` and run the DDL yourself. The pool then connects and creates nothing.
+
+The package exports one DDL builder per table and index, such as `buildEventsTableDDL(DEFAULT_TABLE_NAMES)`, and `bootstrapSchema(pool)` runs all of them.
+
+## Compose the stores
+
+Each store is built from the pool. The scheduling and snapshot tiers wrap the event store, the token store and the dead-letter queue are separate, and `postgresUnitOfWork` makes every unit of work carry a transaction. The example wires all of them into one application.
+
+```ts
+const pg = postgresPool("postgresql://toolstore:secret@localhost:5432/toolstore")
+await pg.start()
+
+// Every unit of work the buses and processors mint carries a Postgres transaction.
+const uow = postgresUnitOfWork(unitOfWork, pg)
+
+// The log, then snapshots around it, then scheduling around that.
+const eventStore = postgresSchedulingEventStore(
+  postgresSnapshottingEventStore(postgresEventStore(pg), pg, jsonSerializer()),
+  pg,
+  uow,
+)
+const tokenStore = postgresTokenStore(pg, { claimTimeoutMs: 20_000 })
+const deadLetters = postgresDeadLetterQueue(pg, { maxSequences: 256, maxSequenceSize: 64 })
+
+// Commands run in the transactional factory. Queries run in the plain one.
+const commandBus = localCommandBus(uow)
+const queryBus = localQueryBus(unitOfWork)
+```
+
+Give the transactional factory to the command bus and to every event processor. Build the query bus from the plain `unitOfWork`, because a read needs no transaction: `localQueryBus` rejects the transactional factory with a compile error and an error at construction.
+
+A processor reads from the event store, keeps its position in the token store, and parks failed events in the dead-letter queue:
+
+```ts
+const inventoryView = deadLettering(
+  batched(eventProcessor("inventory-view", eventStore, tokenStore, uow), 200),
+  deadLetters,
+  byTool,
+)
+
+```
+
+[Event processors](/docs/kronos-ts/event-processors) describes batching and dead lettering. The handler side of the two wrappers is described in [Scheduling](/docs/kronos-ts/scheduling) and [Snapshots](/docs/kronos-ts/snapshots). A state declared with `snapshot` loads from the cached state in the snapshots table and replays only the events after it. Put an upcasting store outside the snapshot wrapper, so that upcasting applies to the events the cached read returns.
+
+`kronos()` does not start the scheduling worker that appends due schedules. Call `startScheduling()` once the application is up, and `stopScheduling()` before closing the pool. `polling` and `batched` set the interval and the batch size. Several nodes can run the worker against one table.
+
+```ts
+// The scheduling worker is not started by kronos(). Tune it by wrapping the
+// store, then start it.
+const scheduler = polling(batched(eventStore, 100), 250)
+await scheduler.startScheduling()
+
+// On shutdown, in this order.
+await scheduler.stopScheduling()
+await pg.close()
+```
+
+## Writing to your own tables
+
+A handler that writes to its own tables declares `PostgresCapability` in its context type and reads `ctx.sql()`. At assembly, wrap the handler function with `postgresHandler(handler, pg)` and spread the entry. Wrapping a handler that does not declare `sql()` is a compile error. `ctx.sql().query(sql, params)` takes `$1` style parameters, so pass user input as parameters and never concatenate it into the statement.
+
+```ts
+// In an event handler ctx.sql() is the batch's transaction: the write commits with the token.
+export const markToolRented = eventHandler(
+  ToolRented,
+  async ({ payload }, ctx: EventHandlerContext & PostgresCapability) => {
+    await ctx.sql().query("UPDATE inventory SET available = false WHERE tool_id = $1", [payload.toolId])
+  },
+)
+```
+
+What commits together depends on the kind of handler.
+
+| Write | In a command handler | In an event handler |
+| --- | --- | --- |
+| Events from `ctx.append` | Appended at the end of the command, in one transaction | Not applicable |
+| `ctx.schedule` and `ctx.cancelSchedule` | In that transaction | Not applicable |
+| Statements on `ctx.sql()` | On the pool, committed as each runs, before the events are appended | In the batch's transaction |
+| The processor's token update and dead letters | Not applicable | In the batch's transaction |
+
+In an event handler, the batch is the transaction. The statements of every handler in the batch, the token update and any dead letters commit or roll back together. A crash cannot advance the token and lose the write, and a batch that fails is delivered again from the old token, so a handler can run again for the same event after a rollback.
+
+In a command handler, `ctx.sql()` is not atomic with the events the command appends. The handler's statements have already committed when the append runs, and a rejected append, such as a conflict, does not undo them. A retry runs them again, so write them idempotently, for instance as an upsert keyed by the entity's id.
+
+```ts
+// In a command handler ctx.sql() is the pool: the write commits as it runs.
+export const registerCustomer = commandHandler(
+  RegisterCustomer,
+  async ({ payload }, ctx: CommandHandlerContext & PostgresCapability) => {
+    await ctx.sql().query(
+      `INSERT INTO customer_names (customer_id, name) VALUES ($1, $2)
+       ON CONFLICT (customer_id) DO UPDATE SET name = EXCLUDED.name`,
+      [payload.customerId, payload.name],
+    )
+    ctx.append(CustomerRegistered, payload)
+  },
+)
+
+export const app = kronos({
+  commandHandlers: [
+    {
+      ...registerCustomer,
+      handler: postgresHandler(registerCustomer.handler, pg),
+      eventStore,
+      commandBus,
+      queryBus,
+    },
+  ],
+})
+```
+
+The guarantee for event handlers holds only when the token store, the dead-letter queue, `postgresHandler` and `postgresUnitOfWork` are built from the same pool. A client you create for the projection uses another connection, and so another transaction. `ctx.sql().unwrap()` returns the driver's own handle on the connection of the current transaction, so bind a query builder to it and never to a pool of its own. The handle is valid only while the transaction is open.
+
+Outside `postgresHandler`, `postgresTransaction(ctx.unitOfWork)` returns the unit of work's transaction and opens it if it has not begun. It rejects for a unit of work that `postgresUnitOfWork` did not make.
+
+<Callout type="warn">
+  Do not call `postgresTransaction(ctx.unitOfWork)` from a command handler. It
+  holds a connection for the rest of the handler, and a `ctx.load` after it
+  waits for a second connection from the same pool. When as many commands
+  run at once as the pool has connections, each waits for a connection that
+  another holds, and none finishes.
+</Callout>
+
+When the handler runs inside `otlpHandler`, each statement on `ctx.sql()` is recorded as a `db.statement` span with the statement text and no parameters.
+
+## Options
+
+`postgresPool` takes these options after the connection string or adapter.
+
+<TypeTable
+  type={{
+    bootstrap: { type: "boolean", description: "Create the tables during start().", default: "true" },
+    tableNames: { type: "TableNames", description: "The names of the five tables. Set all five.", default: "kronos_events, kronos_snapshots, kronos_scheduled_events, kronos_token_entries, kronos_dead_letters" },
+    resilience: { type: "Partial<ResilienceConfig>", description: "Retry policy for the connect and the table creation in start()." },
+    idleInTransactionTimeoutMs: { type: "number", description: "Postgres ends a session whose transaction stays idle this long. Zero disables it. Applies to a connection string only. Set it on the adapter otherwise.", default: "30000" },
+    statementTimeoutMs: { type: "number", description: "Postgres cancels a statement that runs this long. Zero disables it. Applies to a connection string only. Set it on the adapter otherwise.", default: "0" },
+  }}
+/>
+
+`start()` retries a failed connect with exponential backoff and throws the last error when the attempts run out. Set the policy with the pool's `resilience` option: `maxAttempts` (default 10), `initialDelayMs` (100), `maxDelayMs` (30000), `isRetryable` to give up at once on an error that retrying cannot fix, and `log`, called before each retry. The policy covers start-up only, so a later lost connection is an `unavailable` error.
+
+`pgAdapter` takes `connectionString`, `poolConfig` (the `pg.Pool` options, such as `max`, with a default pool size of 10) and the two timeouts above. The other adapters take `connectionString` and the timeouts.
+
+```ts
+// The adapter form picks a different driver or tunes the pool.
+export const tuned = postgresPool(
+  pgAdapter({
+    connectionString,
+    poolConfig: { max: 40 },
+    idleInTransactionTimeoutMs: 15_000,
+    statementTimeoutMs: 60_000,
+  }),
+  {
+    tableNames: {
+      events: "toolstore_events",
+      snapshots: "toolstore_snapshots",
+      scheduled: "toolstore_scheduled",
+      tokens: "toolstore_tokens",
+      deadLetters: "toolstore_dead_letters",
+    },
+    resilience: { maxAttempts: 20, maxDelayMs: 10_000 },
+  },
+)
+```
+
+An open transaction holds back every processor that reads the log, so the idle timeout ends one that stalls. A handler that does slow work that is not a database statement between two statements of a batch can exceed it and lose the batch's transaction. Raise the timeout or move the slow work out of the handler.
+
+`postgresTokenStore(pg, options)`:
+
+<TypeTable
+  type={{
+    claimTimeoutMs: { type: "number", description: "How long a node's claim on a processor segment stays valid without being renewed, in milliseconds. A node renews at half of it, and another node can take a claim older than this.", default: "10000" },
+  }}
+/>
+
+`postgresDeadLetterQueue(pg, options)`:
+
+<TypeTable
+  type={{
+    maxSequences: { type: "number", description: "Most sequences one processing group may hold.", default: "1024" },
+    maxSequenceSize: { type: "number", description: "Most letters one sequence may hold.", default: "1024" },
+    claimDurationMs: { type: "number", description: "How long a replay holds a letter. Set it longer than the replay of one letter, handlers and commit included, or another replayer may take the letter again.", default: "30000" },
+  }}
+/>
+
+The scheduling worker's interval and batch size are set with `polling(store, ms)`, default 1000, and `batched(store, size)`, default 50.
+
+## Errors
+
+| Error | Cause and action |
+| --- | --- |
+| `AppendConditionError` from an append, with `isConflict(error)` true | The events the command depended on changed, and nothing was written. Retry the command. A repeated event identifier fails the same way. |
+| An error marked `unavailable`, with `isUnavailable(error)` true | The server is unreachable, shutting down, out of connections, or a timeout fired. Retry later. |
+| `start()` throws the last connection error | The database was not reachable within the retry policy. Check the connection string and the server. |
+| `postgresPool: no connection yet` | A statement ran before `start()` resolved. Await `start()`. |
+| An error naming `postgresUnitOfWork` | A token store, dead-letter queue, schedule call or `postgresTransaction` got a unit of work without a Postgres transaction. Build the command bus and the processors from `postgresUnitOfWork`. |
+| `UnableToClaimTokenError` | Another node holds the processor segment, or this node lost its claim during a pause. The batch fails and the processor claims again. |
+| `DeadLetterQueueOverflowError` | A group reached `maxSequences` or `maxSequenceSize`. The batch fails and is delivered again. Replay or clear the parked letters. |
+| `NoActiveUnitOfWork` from `schedule` | `schedule` was called outside a handler. |
+| The database ends a session after `idleInTransactionTimeoutMs` | The unit of work fails. Raise the idle timeout or move slow work out of the handler. |
+
+## Related
+
+- [Infrastructure](/docs/kronos-ts/infrastructure) compares the packages and shows how to mix them.
+- [Running on Postgres](/docs/kronos-ts/guides/running-on-postgres) sets up the pool, the stores and a processor step by step.
+- [Projecting into tables](/docs/kronos-ts/guides/projecting-into-tables) writes a read model with `ctx.sql()`.
+- [Event processors](/docs/kronos-ts/event-processors) covers tokens, claims, batches and dead lettering.
+- [Scheduling](/docs/kronos-ts/scheduling) and [Snapshots](/docs/kronos-ts/snapshots) describe the handler side of the two store tiers.

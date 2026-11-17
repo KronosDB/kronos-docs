@@ -1,0 +1,19 @@
+{
+  "name": "kronos-docs-examples",
+  "private": true,
+  "description": "Every code sample in the docs lives here as a real file, typechecked against the published packages. If it doesn't compile, it doesn't ship.",
+  "type": "module",
+  "scripts": {
+    "check": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@kronos-ts/core": "0.3.0",
+    "@kronos-ts/otlp": "0.3.0",
+    "@kronos-ts/postgres": "0.11.0",
+    "@kronos-ts/test": "0.4.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.0"
+  }
+}

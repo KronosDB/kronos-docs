@@ -1,0 +1,134 @@
+---
+title: Events and tags
+description: Events, tags and positions, reading by query, streaming from a position, what a conditional append guarantees, when an append is acknowledged and the size limits.
+---
+
+The event store is a context's append-only log of events. Every event gets a position when it is appended, carries tags, and is read back by queries over its type and tags. A decision's consistency boundary is the set of events it depends on, selected by such a query, and a conditional append stores the decision's events only if that set is unchanged. [Contexts](/docs/kronosdb/contexts) describe how one server holds several logs.
+
+## Events
+
+An event has a type, a payload, tags and some descriptive fields. The client library fills most of them. The server does not interpret the payload, so the serialization format is the client's choice.
+
+| Field | Meaning |
+| --- | --- |
+| `name` | The event type, such as `ToolRented`. Queries match on it. |
+| `tags` | The key and value pairs the event is indexed by. |
+| `payload` | The event's data, as bytes. |
+| `identifier` | A unique id for the event. The server stores it and does not check it for uniqueness. |
+| `version` | The revision of the payload's serialized form. The server stores it. |
+| `timestamp` | When the event happened, in milliseconds since the Unix epoch. The server stores what it is given. |
+| `metadata` | Text key and value pairs, such as a correlation id. Not indexed and not queryable. |
+| `position` | The event's number in the log, set by the server. |
+
+Text fields must be valid UTF-8, and tag keys and values are arbitrary bytes. Each text field, tag key and tag value holds at most 65,535 bytes, and an event has at most 65,535 metadata entries and 65,535 tags. An append is one request of at most 16 MiB, so the events of one append together must fit in it. A client splits a larger batch before sending it, and a larger request closes the connection.
+
+Event types and tag keys that start with `$` belong to the server, which stores some of its own state, such as schedules, as events in the log. An append or a query that names one fails with `invalid_argument`. Reads never return server-written events, so the only visible effect is that positions can skip numbers.
+
+## Tags
+
+A tag is a key and a value. An event about a rental of tool `t-1` by customer `ada` carries the tags `toolId=t-1` and `customerId=ada`. The server indexes every tag and every event type, so a query finds the matching events without scanning the log.
+
+An event can carry any number of tags, and a query on any one of them matches it. The server compares keys and values as bytes: `toolId` and `toolid` are different keys, and `t-1` matches only `t-1`.
+
+## Positions
+
+The position is a number in the context's log, starting at 0 for the first event. An append of `count` events gets consecutive positions, in the order sent. Positions only increase, and a position is not reused after the append that took it was acknowledged.
+
+The head is the position the next event will get, so on an empty log it is 0, and a read from position `n` returns events at `n` and above. A client turns a point in time into a starting position by asking for the first event at or after a timestamp.
+
+A read returns only events up to the committed position, which in a cluster is the position a majority of the voting nodes has. A read therefore never returns an event that a failover could remove, as [Clustering and replication](/docs/kronosdb/replication#consistency) describes.
+
+## Queries
+
+A read takes a list of criteria. A criterion names event types and tags. An event matches a criterion when its type is one of the criterion's types and it carries every one of the criterion's tags. An empty type list matches any type, and an empty tag list matches events with any tags. An event matches the query when it matches at least one criterion.
+
+| Criterion | Matches |
+| --- | --- |
+| Types `ToolRented`, `ToolReturned`; tag `toolId=t-1` | Rentals and returns of tool `t-1`. |
+| No types; tag `customerId=ada` | Every event of any type tagged `customerId=ada`. |
+| No types; tags `toolId=t-1` and `customerId=ada` | Only events that carry both tags. |
+
+A query made of the first two rows matches each event once, in log order. Types are OR, the tags within one criterion are AND, and the criteria are OR. A read with an empty criteria list matches every event, and so does a criterion with no types and no tags. In an append condition the rule differs, because an empty criteria list matches nothing and the append never conflicts.
+
+## Reading a range
+
+A read returns the events matching the criteria from a position up to the head as it was when the request arrived, in log order. The last response carries a consistency marker, which is the head the read was bounded by. A client keeps the marker and sends it with the condition of its next append, so the append conflicts only with events stored after the read. Events arrive in batches, and a client that stops reading holds back only its own read.
+
+## Streaming from a position
+
+A subscription reads like a range read and then stays open. The server sends the matching events that already exist from the start position, then each new matching event as soon as it is committed, until the client cancels it. A processor that projects events into a read model uses a subscription, and stores the position it has handled as its token.
+
+A subscription can exclude event types even when the criteria match them. It can also request progress reports: while no event matches, the server reports at most every given number of milliseconds a position before which every matching event has been delivered. A processor with selective criteria stores that position so that it does not read the same stretch of the log again after a restart.
+
+A subscription ends when the client cancels it, when the connection closes, or when the server fails it with `unavailable` because the context is shutting down. The client subscribes again from its stored position.
+
+## Conditional appends
+
+A conditional append writes events only if no event matching a set of criteria has been stored since a position the client read. The client selects the events its decision depends on with criteria over types and tags, reads them, and sends the same criteria and the marker of its read as the condition of its append. The server writes the events only if no matching event has a position at or after the marker. The check and the write are one step, so either the events are written and the boundary was unchanged, or nothing is written.
+
+The marker comes from the server: the last response of a read carries the head the read was bounded by, and an append response carries the position after the events it wrote. A client that read the events about a tool and a customer at head 4821 and appends under marker 4821 makes its condition cover every event those criteria matched before position 4821. The append of a `ToolRented` event under the criteria `toolId=t-1` and `customerId=ada` therefore succeeds only if no event with either tag was stored since position 4821.
+
+An append without a condition always writes. An append whose condition has an empty criteria list also always writes, because no event can match an empty list. In a cluster, one leader checks every condition against its own log, so a conditional append means the same on a cluster as on a single node.
+
+### Conflicts
+
+A failed condition is a result, not an error. The server returns an append conflict carrying the position of the first matching event at or after the marker, and writes nothing. A client reads the criteria again, decides again with the events it missed, and appends again with the new marker. The conflicting position locates the first change the client missed, so a client can read only the events from that position when it can reuse its earlier state.
+
+A conflict is also the result of a retry whose first attempt was already written. When a connection drops before the response arrives and the client sends the same append with the same condition, the events the first attempt wrote carry the tags the condition names, so the retry conflicts and the client reads to find its own events. This makes a conditional append safe to retry when its events match its own criteria, which is normally the case for an event that records a decision about the tags it read. An append without a condition is not safe to retry that way, and neither is one whose events fall outside its criteria. The server does not deduplicate by event `identifier`.
+
+### Batches
+
+The events of one append are written as one unit under one condition. They get consecutive positions in the order sent, and either all are stored or none. The response returns the first position, the count and a new marker, `first position + count`, which is the marker of a next conditional append that builds on these events.
+
+Batching the events that belong to one decision keeps them atomic, so a rental that records `ToolRented` and a counter event for the customer is stored together or not at all. Batching also lowers the cost per event, since the server checks the condition once and writes the batch together. An append with no events only evaluates its condition: it returns a count of 0 when the condition holds and a conflict when it does not.
+
+### Durability
+
+The server acknowledges an append only after the events are safe on enough storage. Until then the client receives no response, so an acknowledged append survives the failures described here, and a conflict is reported only for events that are themselves committed.
+
+On a single node an append is acknowledged when its events are fsynced. In a cluster it is acknowledged when a majority of the voting nodes have the events. What a node must have done before it counts toward the majority is the `ack-mode` option under `[storage]`:
+
+| Mode | A cluster append is acknowledged when | A single node |
+| --- | --- | --- |
+| `durable` | A majority of voters have fsynced the events. | After the local fsync. |
+| `written` | A majority of voters have written the events to their log. Their fsync follows within moments. | After the events are written, before the fsync. |
+| `auto` | As `durable` when the disk's fsync measured at startup is fast, as `written` otherwise. | After the local fsync. |
+
+`auto` is the default. At startup the server times 100 small writes with `fdatasync`. When the 99th-percentile time is under 1 ms a cluster uses durable acknowledgements, and on a slower disk or one it could not measure it uses written acknowledgements. A written acknowledgement has one failure case: a hard failure of a majority of the voters at the same moment loses the events that were being synced.
+
+Appends that arrive while another is being synced share one fsync. `group-commit-ms` adds a waiting window in milliseconds, 0 by default, which raises throughput at the price of latency.
+
+If an fsync fails, the server cannot make the written events durable, so it stops accepting appends. Pending and later appends fail with `internal` and a message that the event store is poisoned, until the server is restarted. The metric `kronosdb_engine_poisoned` reports the state, and [Monitor a server](/docs/kronosdb/monitoring#set-alerts) shows the alert.
+
+## Snapshots and schedules
+
+A snapshot is a state blob a client folded from events, stored under a key the client composes with the marker of the read it was folded from. A client reads the latest snapshot for a key followed by the events from its position. A state larger than 4 MiB is rejected with `invalid_argument`, and the limit is the `max-snapshot-size` option. A snapshot is replicated and recovered like an event.
+
+A schedule makes the server append an event at its due time. A client schedules an event with a due time and a token, cancels it by the token, and lists the pending ones. Scheduling with a token that already exists changes nothing, and an empty token makes the server generate one. Only the leader of a cluster fires schedules, using its own clock.
+
+## Options
+
+| Option | Where | Default | Purpose |
+| --- | --- | --- | --- |
+| `ack-mode` | `[storage]`, `--ack-mode`, `KRONOSDB_ACK_MODE` | `auto` | What an acknowledgement waits for: `auto`, `written` or `durable`. |
+| `group-commit-ms` | `--group-commit-ms`, `KRONOSDB_GROUP_COMMIT_MS` | `0` | Extra waiting window to share an fsync between appends, in milliseconds. |
+| `max-snapshot-size` | `[storage]` | 4 MiB | Largest snapshot a client may store. |
+
+## Errors
+
+| Result | When | What to do |
+| --- | --- | --- |
+| Append conflict | An event matching the criteria exists at or after the marker. | Read again, decide again and append with the new marker. |
+| `unavailable` | The node is starting, an election is running, or the leader cannot be reached. | Retry. Nothing was written. |
+| `unavailable`, outcome unknown | Leadership was lost before the append was acknowledged. The events may have been committed by a majority or discarded by the next leader. | Retry the append with its condition: a conflict means the first attempt was committed, and an acknowledgement means it was not and has now been written. |
+| `invalid_argument` | A record is malformed or not valid UTF-8, a type or tag key starts with `$`, or a snapshot is over the size limit. | Fix the request. Retrying does not help. |
+| `permission_denied` | The principal lacks the `read` role, for reads, or `write`, for appends, on the context. | Check the credentials and grants. |
+| `not_found` | The context does not exist. | Create the context or fix its name. |
+| `corrupted` | A stored record failed its checksum. This is never a false alarm. | Restore the node as described in [Back up and restore](/docs/kronosdb/backups). |
+| `internal` | An fsync failed and the event store is poisoned. | Check the volume, then restart the node. |
+
+## Related
+
+- [Contexts](/docs/kronosdb/contexts) explains how one server holds several logs.
+- [Clustering and replication](/docs/kronosdb/replication) explains the committed position and failover.
+- [State and consistency](/docs/kronos-ts/state) shows how Kronos builds criteria and conditions from states.

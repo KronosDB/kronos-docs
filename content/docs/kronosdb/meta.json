@@ -1,0 +1,21 @@
+{
+  "title": "KronosDB",
+  "description": "The event store",
+  "root": true,
+  "pages": [
+    "---What is KronosDB---",
+    "index",
+    "events-and-tags",
+    "contexts",
+    "messaging",
+    "replication",
+    "---Running KronosDB---",
+    "getting-started",
+    "configuration",
+    "security",
+    "clustering",
+    "backups",
+    "monitoring",
+    "admin-console"
+  ]
+}

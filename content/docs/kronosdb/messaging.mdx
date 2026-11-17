@@ -1,0 +1,91 @@
+---
+title: Messaging
+description: Buses, how commands and queries reach handlers, subscription queries, what happens when no handler is connected, and processor control.
+---
+
+KronosDB's messaging server routes commands, queries and subscription queries between the processes of an application. A process that handles a message registers a handler with the server, and a process that sends one calls the server to deliver it. The server selects a handler, delivers the message to it, and returns the handler's result to the sender. Messaging uses the same connections as the event store, but it is a separate part: it stores nothing, and it does not depend on [contexts](/docs/kronosdb/contexts).
+
+All messaging happens on a bus, a named set of handlers. Each bus holds a command bus, a query bus and the registry of subscription queries.
+
+## Buses
+
+A bus is a name. Buses are created the first time something uses them, with no declaration or configuration, and a connection that uses none is on the bus named `default`. Senders on `toolstore` reach only the handlers registered on `toolstore`.
+
+The mapping between buses and contexts is up to the applications. Several contexts can share one bus, one process can use several buses, and a deployment can use buses with no contexts at all. A message is delivered only when the sender and the handler use the same bus name, and a misspelled bus name creates an empty bus, so the command fails with `unavailable` because no handler is registered on it.
+
+Access to a bus is granted by name in the same way as for contexts. A principal needs the `write` role on a bus to dispatch commands and to register command or query handlers, and the `read` role to dispatch queries and open subscription queries, as [Security](/docs/kronosdb/security) describes for roles and grants.
+
+## Handlers
+
+A process registers its command and query handlers by message name, with the bus, the application's component name and its own client id. The component name is shared by all instances of an application, and the client id is unique to one instance. A command handler can register a load factor, the relative share of that command's traffic it takes.
+
+Registrations belong to the connection. When a handler's connection closes, everything it registered is removed, and a client that stops responding to heartbeats is removed after the heartbeat timeout, 15 seconds by default. A new registration from the same client on the same bus replaces the older one, which ends with `unavailable`.
+
+In a cluster, every node holds the registry of all handlers, so a sender can connect to any node and reach a handler connected to any other.
+
+## Commands
+
+The server routes a command to exactly one of the handlers registered for its name, waits for the handler's result, and returns it to the sender. A handler's own failure is carried in the result as an error code and detail, which are empty when the handler succeeded. The server sets two codes of its own in the same place: `KRONOSDB-4005` when the handler did not respond in time and `KRONOSDB-4006` when the connection to the handler was lost before it responded.
+
+Which handler gets a command depends on its processing instructions:
+
+| Instruction | Effect |
+| --- | --- |
+| `routing_key` | Commands with the same key go to the same handler. Adding or removing a handler reassigns only that handler's share of the keys. |
+| `timeout` | The milliseconds the sender will wait, from 1 second to 1 hour. Without it the command timeout of the server applies, 30 seconds by default. |
+| `priority` | Commands with a priority of 0 or less are rejected when the bus holds 10,000 commands in flight, and every command is rejected at 11,000. |
+
+A command without a routing key goes to a handler chosen by weighted round-robin, and handlers on the node that received the command are preferred. A keyed command is always sent to the handler its key selects, and never to another handler because the first is busy, since that would break the ordering the routing key provides. A handler limits the work it has in progress by granting its client library's permits. When the chosen handler has none left, the server waits for it to grant more, inside the same time budget as the command, and fails with `unavailable` if none arrive. `[messaging] permit-wait = false` turns the wait off and fails at once.
+
+## Queries
+
+The server sends a query to every handler registered for its query name, on every node, and returns their results to the sender in the order they arrive. The query ends when every handler has responded, or when the timeout passes. A handler that has no permits left when the query arrives is skipped, and a query that finds no handler with permits waits for a grant as a command does.
+
+The instruction `nr_of_results` with the value 1 requests a single result. The server then sends the query to one handler, preferring one on the receiving node, and distributes such queries over the handlers in turn. Any other value, or none, means scatter-gather to all handlers. A handler's failure is carried in the error code of its result. A handler that disconnects while a query is in flight is not waited for any more, and the sender receives no result from it.
+
+## Subscription queries
+
+A subscription query returns an initial result and then keeps sending updates as the data it queried changes. The server sends the query to one handler. The handler returns the initial result, any number of updates, and at the end a completion or a failed completion. The subscriber ends the subscription by cancelling it.
+
+Updates are paced by permits. The subscriber grants a number of updates it will accept, and an update that arrives when it has none left is dropped, so a handler that must not lose an update holds it until more permits are granted. A subscription fails with `unavailable` when no handler is registered for the query. When the handler disconnects, the subscriber receives a failed completion with the code `KRONOSDB-4006`.
+
+## When there is no handler
+
+A command that finds no handler for its name, or no handler with permits within the timeout, fails with `unavailable`, and nothing is stored. A command is not queued for a handler that connects later. The sender retries the command or reports the failure to its own caller.
+
+A command already sent to a handler that disconnects before it responds gets the result `KRONOSDB-4006`. A command whose handler is still working when the timeout passes gets the result `KRONOSDB-4005`, and the handler may still complete it. Since the outcome of such a command is unknown, a sender that retries it needs the handler to be idempotent, which events appended under a condition provide. In a cluster, when a node dies the commands in flight to its handlers fail the same way, and the next command is sent to another handler.
+
+A query sent to a bus with no handler for its name fails with `unavailable`. A query whose handler disconnects returns the results of the others. When the timeout passes while a handler on the receiving node is still working, the query ends with `unavailable` after the results already sent.
+
+## Processors
+
+A client that runs event processors reports them to the server, together with its identity: client id, component name, version and tags. The report names each processor with its mode, whether it runs, whether it is in an error state, and each segment it holds with its token position, whether it has caught up or is replaying, and its error state. The [admin console](/docs/kronosdb/admin-console) and `GET /api/v1/processors` show these reports. Segments are described for Kronos in [Event processors](/docs/kronos-ts/event-processors).
+
+The admin console and the admin API send instructions to every instance that runs a processor: `POST /api/processors/{name}/pause`, `start`, `split` and `merge`. Pause and start stop and resume the processor. A split divides the segment that covers the largest share of the event space into two halves, and a merge joins the segment that covers the smallest share with its sibling, which changes how much parallelism a processor has. The response reports how many clients received the instruction. A processor that no connected client reports fails with `no clients found for processor`. A client reports its processors only if it implements this, as the TypeScript client does.
+
+## Options
+
+| Option | Where | Default | Purpose |
+| --- | --- | --- | --- |
+| `command` | `[timeouts]`, `--command-timeout`, `KRONOSDB_COMMAND_TIMEOUT` | 30 | Seconds a command may take. |
+| `query` | `[timeouts]`, `--query-timeout`, `KRONOSDB_QUERY_TIMEOUT` | 30 | Seconds a query may take. |
+| `heartbeat-interval` | `[timeouts]`, `--heartbeat-interval`, `KRONOSDB_HEARTBEAT_INTERVAL` | 5 | Seconds between server heartbeats to a client. |
+| `heartbeat-timeout` | `[timeouts]`, `--heartbeat-timeout`, `KRONOSDB_HEARTBEAT_TIMEOUT` | 15 | Seconds of silence after which a client is removed. |
+| `permit-wait` | `[messaging]` | `true` | Wait for a grant when a handler is out of permits, inside the command's time budget. |
+
+## Errors
+
+| Failure | When |
+| --- | --- |
+| `unavailable` | No handler is registered for the message name on the bus, no handler has permits within the timeout, or a registration was replaced by a newer one. |
+| `already_exists` | A command with the same message id is already in flight. |
+| `resource_exhausted` | The bus holds too many commands in flight, 10,000 for low-priority commands and 11,000 for all. |
+| `KRONOSDB-4005` in a command or subscription result | The handler did not respond in time. |
+| `KRONOSDB-4006` in a command or subscription result | The connection to the handler was lost. |
+| `permission_denied` | The principal lacks the role the request needs on the bus. |
+
+## Related
+
+- [Clustering and replication](/docs/kronosdb/replication) explains the nodes messages are forwarded between.
+- [Commands](/docs/kronos-ts/commands) and [Queries](/docs/kronos-ts/queries) show the Kronos side.
+- [Admin console](/docs/kronosdb/admin-console) shows handlers, subscriptions and processors.

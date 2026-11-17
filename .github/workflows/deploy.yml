@@ -1,0 +1,64 @@
+name: Docs
+
+# Every push to main checks the docs against kronos-ts main and deploys them
+# to Cloudflare. Pull requests run the same checks without deploying.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      # The examples typecheck against the kronos-ts sources, which they reach
+      # as ../../kronos-ts from kronos-docs/examples, so both repositories are
+      # checked out side by side.
+      - uses: actions/checkout@v4
+        with:
+          path: kronos-docs
+      - uses: actions/checkout@v4
+        with:
+          repository: KronosDB/kronos-ts
+          ref: main
+          path: kronos-ts
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: kronos-ts/.bun-version
+
+      - name: Install
+        run: |
+          (cd kronos-ts && bun install --frozen-lockfile)
+          (cd kronos-docs && bun install --frozen-lockfile)
+          (cd kronos-docs/examples && bun install --frozen-lockfile)
+
+      - name: Typecheck examples
+        working-directory: kronos-docs/examples
+        run: bun run check
+
+      - name: Check excerpts and prose
+        working-directory: kronos-docs
+        run: |
+          python3 scripts/check-excerpts.py
+          python3 scripts/lint-prose.py
+
+      - name: Build
+        working-directory: kronos-docs
+        env:
+          NODE_OPTIONS: --max-old-space-size=8192
+        run: bun run build
+
+      - name: Deploy
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: kronos-docs
+          command: deploy

@@ -1,0 +1,10 @@
+node_modules
+.next
+.source
+next-env.d.ts
+out
+.wrangler
+.agents
+.claude
+AGENTS.md
+CLAUDE.md

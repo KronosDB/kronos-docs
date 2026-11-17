@@ -1,0 +1,253 @@
+---
+title: Testing
+description: How to write given/when/then scenarios and read-model storylines against an assembled Kronos application with @kronos-ts/test.
+---
+
+`@kronos-ts/test` runs scenarios against the application you built with `kronos()`. A scenario states the events that already happened, one act (a command, a query or an event arriving), and what that act should have caused: events appended, commands dispatched, a result returned, deadlines armed. A test needs no mocks and exercises the same handlers, states and processors as production.
+
+Scenarios take the shapes an event model is written in. A command scenario gives events, sends a command, and claims events or a result. A view scenario gives events, sends a query, and claims the result. An automation scenario gives events, delivers an event, and claims the commands that were dispatched. A storyline checks one read model after each event of a sequence. A worked example of these scenarios is in [Test a slice](/docs/kronos-ts/guides/testing-a-slice).
+
+## A fixture over an assembled app
+
+A fixture is created from an application with `fixture(app)`. The application must be built so that the fixture can record it: the event store is wrapped in `recordingEventStore` and the command bus in `recordingCommandBus` where they are created, and the entries carry the wrapped objects. An app whose event store or command bus is not recorded fails to compile.
+
+```ts
+const clock = advanceableClock()
+const uow = () => unitOfWork(clock)
+const eventStore = recordingEventStore(inMemoryEventStore(), { clock })
+const commandBus = recordingCommandBus(localCommandBus(uow))
+const queryBus = localQueryBus(uow)
+```
+
+The clock is optional. Passing `{ clock }` to `recordingEventStore` holds the store's scheduled events until the test advances the clock, which enables `advance`, `scheduled` and `cancelled` ([Time](#time)). Build the unit of work factory on the same clock so that timestamps in handlers agree with it. The rest of the assembly is the ordinary `kronos()` call:
+
+```ts
+return kronos({
+  commandHandlers: [
+    { ...addTool, eventStore, commandBus, queryBus },
+    { ...registerCustomer, eventStore, commandBus, queryBus },
+    { ...rentTool, eventStore, commandBus, queryBus },
+  ],
+  eventHandlers: [
+    { ...armOverdue, eventStore, commandBus, queryBus, processor: deadlines },
+    { ...recordAddedTool, commandBus, queryBus, processor: inventoryView },
+    { ...recordRentedTool, commandBus, queryBus, processor: inventoryView },
+  ],
+  queryHandlers: [{ ...getInventory, queryBus }],
+})
+```
+
+A fixture drives one module. An app that has more than one event store, command bus or query bus fails when the first scenario runs, so build the app for a test from the configuration of the module under test. `fixture` also accepts a promise of an app.
+
+The fixture never stops the app. The test stops it, together with anything else it opened, in its runner's teardown hook:
+
+```ts
+const app = toolStore()
+const toolStoreFixture = fixture(app)
+
+afterAll(() => app.stop())
+```
+
+## Scenarios
+
+A scenario is built with `given`, `when` and `then`, and `then` runs it. `given` takes events that already happened and may be repeated; the events accumulate in order. `when` takes the act. `then` takes any number of claims and resolves with the outcome, or rejects if a claim does not hold.
+
+```ts
+await toolStoreFixture
+  .when(command(AddTool, { toolId: "t-10", model: "DCD791", name: "Cordless drill" }))
+  .then(events(event(ToolAdded, { toolId: "t-10", model: "DCD791", name: "Cordless drill" })))
+```
+
+The functions `event`, `command` and `query` build message values. The same function describes a message whether it is history in `given`, an act in `when`, or an expectation in `then`. A payload is checked against the descriptor's type at compile time.
+
+`given` events are appended through the recorded event store, and the fixture then waits until every processor in the app has handled them. The processors handle them live, so `ctx.isReplay()` is false in handlers, and event handlers have their usual effects: a command a handler dispatches is sent, and a deadline it arms is armed. `when` starts recording before it runs the act, so nothing that `given` caused appears in the outcome.
+
+```ts
+await toolStoreFixture
+  .given(
+    event(ToolAdded, { toolId: "t-12", model: "DWE7491", name: "Table saw" }),
+    event(CustomerRegistered, { customerId: "ada-12", name: "Ada", maxRentals: 2 }),
+  )
+  .when(command(RentTool, { toolId: "t-12", customerId: "ada-12" }))
+  .then(
+    result({ rented: true }),
+    events(event(ToolRented, { toolId: "t-12", customerId: "ada-12" })),
+  )
+```
+
+The act is one of three kinds. A command is dispatched on the command bus, and the outcome holds its result or the error it threw. A query is dispatched on the query bus, and the outcome holds its result. An event arrives: it is appended to the log, the processors handle it, and the outcome holds what that caused. `outcome.events` includes the arriving event, because it is appended like any other.
+
+```ts
+await toolStoreFixture
+  .when(event(ToolRented, { toolId: "t-18", customerId: "ada" }))
+  .then(
+    events(event(ToolRented, { toolId: "t-18", customerId: "ada" })),
+    scheduled(event(RentalOverdue, { toolId: "t-18", customerId: "ada" }), SEVEN_DAYS),
+    noCommands(),
+  )
+```
+
+`then` with no claims runs the scenario and resolves with the outcome. Awaiting a scenario that has a `when` but no `then` does the same.
+
+## Results and errors
+
+A command ends in one of two ways, which a test checks separately. A command whose descriptor declares a `result` returns it, including a business refusal such as `{ rented: false, reason: "tool-unavailable" }`. A command that throws ends in an error. Claim a returned result with `result(value)` and a throw with `error(matcher)`.
+
+```ts
+await toolStoreFixture
+  .given(event(CustomerRegistered, { customerId: "ada-15", name: "Ada", maxRentals: 2 }))
+  .when(command(RentTool, { toolId: "t-15", customerId: "ada-15" }))
+  .then(result({ rented: false, reason: "tool-unavailable" }), noEvents())
+```
+
+`result` compares deeply and strictly, and a field in the actual value that the expectation does not name is a difference. It also applies to a query's result. It cannot be used when the act is an event arriving, because an event has no result, and the scenario fails with an error.
+
+`error` claims that the act threw. Claiming the throw is what stops the scenario from rethrowing it: when no claim in `then` is an `error`, a thrown error rejects the scenario as itself, and the thrown error, not a diff, is what the test runner reports. The matcher is a string, which the message must contain; a regular expression, which the message must match; or a predicate on the thrown value.
+
+```ts
+await toolStoreFixture
+  .given(event(ToolAdded, { toolId: "t-13", model: "DCD791", name: "Cordless drill" }))
+  .when(command(AddTool, { toolId: "t-13", model: "DCD791", name: "Cordless drill" }))
+  .then(error("already exists"), noEvents())
+```
+
+[Refuse a command](/docs/kronos-ts/guides/refusing-a-command) describes when a handler should return a refusal and when it should throw.
+
+## Claims
+
+A claim is a function of the outcome that returns when it holds and throws when it does not. `then` runs every claim and reports every one that fails, not only the first.
+
+| Claim | Holds when |
+| --- | --- |
+| `events(...expected)` | Exactly these events were appended during the act, in this order. |
+| `noEvents()` | Nothing was appended. |
+| `commands(...expected)` | Exactly these commands were dispatched by the handlers the act ran, in this order. The act's own command is not counted. |
+| `noCommands()` | No command was dispatched. |
+| `result(value)` | The act's result equals `value`. |
+| `error(matcher)` | The act threw an error the matcher accepts. |
+| `scheduled(event, after)` | A deadline for this event was armed to fire `after` milliseconds after the clock instant at which it was armed. |
+| `cancelled(event)` | A deadline for this event was cancelled before it fired. |
+
+Event and command lists are exact. An event the act appended that the expectation does not list is reported as unexpected, and a listed event that was not appended is reported as missing. Payloads are compared deeply and strictly. An expectation leaves a field unchecked with `any()`, or requires only that a field satisfies a schema with `any(schema)`:
+
+```ts
+await toolStoreFixture
+  .when(command(AddTool, { toolId: "t-11", model: "D24000", name: "Tile saw" }))
+  .then(events(event(ToolAdded, { toolId: "t-11", model: any(), name: any(z.string()) })))
+```
+
+`any()` is for claims. A hole in a `given` event or an arriving event is a usage error, because those are stored in the log. Metadata is claimed as a subset: `event(descriptor, payload, metadata)` checks only the metadata keys it names, and each may be an `any()` hole.
+
+`events` and `commands` list what happened during the act only. `given` is history and is never in the outcome. Events and commands that the app's own automations produced in reaction to the act are in the outcome, because the fixture waits for the processors to finish before it checks the claims.
+
+### Your own claims
+
+`then` accepts any function that takes an `Outcome`. It passes by returning and fails by throwing, so an assertion from your test runner works directly. The outcome has the act's `result`, `error`, `events` and `commands`, and the running `app`.
+
+## Steps
+
+`.and` continues a scenario with the state the previous step left. The events appended by one step are history for the next, and the processor positions and read model contents from one step remain for the next. Chaining runs a sequence of steps against one state and reports them as one sentence.
+
+```ts
+await toolStoreFixture
+  .when(command(AddTool, { toolId: "t-21", model: "DCD791", name: "Cordless drill" }))
+  .then(events(event(ToolAdded, { toolId: "t-21", model: "DCD791", name: "Cordless drill" })))
+  .and.when(command(RegisterCustomer, { customerId: "ada-21", name: "Ada", maxRentals: 1 }))
+  .then(events(event(CustomerRegistered, { customerId: "ada-21", name: "Ada", maxRentals: 1 })))
+  .and.when(command(RentTool, { toolId: "t-21", customerId: "ada-21" }))
+  .then(result({ rented: true }))
+  .and.when(command(RentTool, { toolId: "t-21", customerId: "ada-21" }))
+  .then(result({ rented: false, reason: "tool-unavailable" }), noEvents())
+```
+
+A step after a failed step does not run.
+
+## Storylines
+
+A storyline checks one read model after each event of a sequence. It starts from a query and alternates `shows`, which dispatches the query and checks the result, with `after`, which appends events and waits for the processors to handle them. A storyline is awaited as it stands; it has no `then` to write.
+
+```ts
+await toolStoreFixture
+  .storyline(query(GetInventory, {}))
+  .after(event(ToolAdded, { toolId: "t-17", model: "DCD791", name: "Cordless drill" }))
+  .shows(({ result: rows }: Outcome) => {
+    const inventory = rows as Array<{ toolId: string; available: boolean }>
+    if (inventory.find((row) => row.toolId === "t-17")?.available !== true) throw new Error("expected available")
+  })
+  .after(event(ToolRented, { toolId: "t-17", customerId: "ada" }))
+  .shows(({ result: rows }: Outcome) => {
+    const inventory = rows as Array<{ toolId: string; available: boolean }>
+    if (inventory.find((row) => row.toolId === "t-17")?.available !== false) throw new Error("expected rented")
+  })
+```
+
+`shows` takes either the expected result, which is compared like `result`, or any claim function, which is judged with the query as the act. When a beat fails, the error names the beat that failed and the beats before it, for example `storyline of GetInventory, beat 4 (after ToolAdded, shows, after ToolRented)`.
+
+## Time
+
+Scheduled events fire in a test when the test advances the clock. `advanceableClock()` returns a clock that starts at `FIXTURE_EPOCH`, 2024-01-01 at midnight UTC, and changes only when `advance` is called. Build the unit of work on it and pass it to `recordingEventStore`, as in the fixture above. Events given to the fixture and events arriving in it are stamped from that clock.
+
+`advance(ms)` is available on a scenario only when the event store was given a clock. Before the act it advances the clock and fires the deadlines that are due, and their effects are not in the outcome. After the act it does the same, and their effects are in the outcome. Events that fire are appended in the order they are due, each stamped with the instant it fires.
+
+```ts
+await toolStoreFixture
+  .when(event(ToolRented, { toolId: "t-19", customerId: "ada" }))
+  .advance(SEVEN_DAYS)
+  .then(
+    events(
+      event(ToolRented, { toolId: "t-19", customerId: "ada" }),
+      event(RentalOverdue, { toolId: "t-19", customerId: "ada" }),
+    ),
+  )
+```
+
+With a clock, scheduled events are held in memory in place of the wrapped store's scheduling, and nothing fires on a timer. A deadline becomes due only once the handler that armed it has committed, and a deadline armed by a handler that fails is dropped. `scheduled(event, after)` takes a delay relative to the moment of arming, so a test states "seven days from now" and does not compute an absolute time. The event is compared with the payload you give it, `any()` holes included.
+
+## Running many scenarios
+
+One fixture runs many scenarios, and building the app once per file is the normal pattern. Scenarios on a fixture run one at a time even when the runner starts them together, and the outcome of each contains only what its own act did. Nothing is reset between them: the event log, the processors' positions, the read models and the clock all persist. Scenarios stay apart by using their own ids, as the examples on this page do with `t-10`, `t-11` and so on, or by building a fresh app per test.
+
+## Failure messages
+
+A failing claim rejects with a `ScenarioAssertionError`. Its message starts with the scenario as a sentence, derived from the steps and claims, and then lists each failing claim. For events and commands it prints both lists in full, aligns them by name so that a single missing event is reported as one missing event, and prints a field-level difference for each pair that matches by name.
+
+A scenario that adds a tool and claims the name `Drill` for it, when the handler stored `Cordless drill`, rejects with this message:
+
+```text
+when AddTool, then ToolAdded
+
+events did not match what the act appended.
+  expected (1):
+    [0] toolstore.ToolAdded
+  appended (1):
+    [0] toolstore.ToolAdded
+
+  payload differences:
+    ~ [0] toolstore.ToolAdded
+        name: expected "Drill", got "Cordless drill"
+```
+
+Missing events are printed with a `-`, unexpected events with a `+`, and an `any()` hole as `*`.
+
+## Errors
+
+A claim that does not hold rejects the scenario with a `ScenarioAssertionError`, described under [Failure messages](#failure-messages). An act that throws, with no `error` claim among the claims, rejects the scenario with the thrown error itself.
+
+Misuse of the test package is thrown as an `Error` whose message starts with `@kronos-ts/test:` and names the fix. Causes include:
+
+- `any()` inside a `given` event or an arriving event.
+- `result(...)` when the act is an event arriving.
+- `scheduled`, `cancelled` or `advance` against an event store with no clock. Create the store with `recordingEventStore(store, { clock })`.
+- An event store or command bus that is not recorded.
+- An app with more than one event store, command bus or query bus.
+- A scenario with no `when`.
+
+When the app's processors do not reach the end of the log within five seconds after a `given` or an act, the fixture throws an error that lists each processor's position and whether it is stopped or busy. An event handler that dispatches a command whose events trigger it again never settles, an event handler that keeps failing keeps its processor at the same position, and a stopped processor never advances.
+
+## Related
+
+- [Test a slice](/docs/kronos-ts/guides/testing-a-slice) tests the renting rules and the inventory projection.
+- [Refuse a command](/docs/kronos-ts/guides/refusing-a-command) shows how a refusal and a thrown error are asserted differently.
+- [Assembly](/docs/kronos-ts/assembly) describes `kronos()` and its entries.
+- [Scheduling](/docs/kronos-ts/scheduling) describes the deadlines `scheduled` and `advance` test.
+- [Event processors](/docs/kronos-ts/event-processors) describes the processors the fixture waits for.

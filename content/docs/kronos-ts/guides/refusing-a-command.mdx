@@ -1,0 +1,132 @@
+---
+title: Refuse a command
+description: Decide whether a refusal is a command result or a thrown error, declare it, handle it in the caller, and test each.
+---
+
+When you are done, `RentTool` returns a typed refusal for the business reasons a rental can fail, the handler throws only for what the caller cannot act on, the caller turns each outcome into a reply, and tests assert both kinds. You need the tool store from [Getting started](/docs/kronos-ts/getting-started) or any command handler that can return a refusal.
+
+## Choose result or error
+
+A refusal is a command result when the caller can act on it. Renting a tool that is already out, to a customer who is not registered or who is at their limit, are outcomes a counter screen or an API reports to the person asking. Each has a known set of reasons, so the handler returns a value naming the reason and appends nothing.
+
+A refusal is a thrown error when the caller can only retry or report it: a bug, a broken invariant, or a failure of the infrastructure. Adding a tool whose id already exists means the caller sent a command it should never have sent, and an append conflict means an event matching the decision's query was stored after the decision read it. Throwing rolls the command back and nothing is appended.
+
+## Declare the result
+
+The descriptor of a command that can be refused declares a `result` schema. The schema describes both outcomes of `RentTool`, so the handler's return value is type-checked against it and the caller receives the same type:
+
+```ts
+export const RentTool = ns.command("RentTool", {
+  payload: z.object({ toolId: z.string(), customerId: z.string() }),
+  result: z.discriminatedUnion("rented", [
+    z.object({ rented: z.literal(true) }),
+    z.object({
+      rented: z.literal(false),
+      reason: z.enum(["tool-unavailable", "customer-unknown", "over-limit"]),
+    }),
+  ]),
+})
+```
+
+[Messages](/docs/kronos-ts/messages) covers descriptors and results in full. A discriminated union lets the caller narrow with `if (outcome.rented)`, and a new reason makes every `switch` on it that lacks the case fail to compile.
+
+## Return a refusal
+
+The handler loads the state, checks the rules in order, and returns a refusal before it appends anything. Only the success path appends:
+
+```ts
+if (!renting.toolAdded || toolIsOut) return { rented: false, reason: "tool-unavailable" }
+if (!renting.customerRegistered) return { rented: false, reason: "customer-unknown" }
+if (customerRentals.length >= renting.maxRentals) return { rented: false, reason: "over-limit" }
+
+ctx.append(ToolRented, payload)
+return { rented: true }
+```
+
+The order of the checks determines which reason is returned when several apply. The caller's `send` resolves with the refusal.
+
+## Throw for what the caller cannot act on
+
+The `AddTool` handler throws when the tool exists, because a duplicate id is a mistake rather than a business outcome. The thrown error reaches the caller as a rejected `send`:
+
+```ts
+if (tool.exists) throw new Error(`tool ${payload.toolId} already exists`)
+```
+
+A throw is also what a failed append condition produces. The error carries a kind that a caller can test with the guards `isConflict`, `isUnavailable` and `isNoHandler`, which read the `kind` field and so work on errors that crossed a transport. The commands page lists them under [Failures](/docs/kronos-ts/commands#failures), along with when each is thrown.
+
+## Handle each outcome in the caller
+
+The caller reads the result and switches on the reason, and wraps the call to deal with failures. An HTTP edge maps the refusals to client errors, a conflict to a retry, and unavailable infrastructure to 503. Any other error is rethrown to be reported as a server error:
+
+```ts
+export async function rentEndpoint(commandBus: CommandBus, toolId: string, customerId: string): Promise<Reply> {
+  try {
+    const outcome = await send(commandBus, RentTool, { toolId, customerId })
+    if (outcome.rented) return { status: 200, body: { message: `${customerId} rented ${toolId}` } }
+
+    switch (outcome.reason) {
+      case "tool-unavailable":
+        return { status: 409, body: { message: `${toolId} is not on the shelf` } }
+      case "customer-unknown":
+        return { status: 404, body: { message: `${customerId} is not registered` } }
+      case "over-limit":
+        return { status: 422, body: { message: `${customerId} is at their rental limit` } }
+    }
+  } catch (failure) {
+    if (isConflict(failure)) return { status: 409, body: { message: "someone else changed this, try again" } }
+    if (isUnavailable(failure)) return { status: 503, body: { message: "try again shortly" } }
+    throw failure
+  }
+}
+```
+
+The refusal handling produces a message for the customer. The failure handling retries or reports.
+
+## Test each kind
+
+Tests assert a refusal with `result(...)` and a throw with `error(...)`. Claim `noEvents()` alongside either, because both mean the command appended nothing. The fixture these tests use is described in [Testing](/docs/kronos-ts/testing).
+
+```ts
+await toolStoreFixture
+  .given(
+    event(ToolAdded, { toolId: "t-1", model: "DCD791", name: "Cordless drill" }),
+    event(CustomerRegistered, { customerId: "ada", name: "Ada", maxRentals: 1 }),
+    event(ToolRented, { toolId: "t-1", customerId: "ada" }),
+  )
+  .when(command(RentTool, { toolId: "t-1", customerId: "ada" }))
+  .then(result({ rented: false, reason: "tool-unavailable" }), noEvents())
+```
+
+```ts
+await toolStoreFixture
+  .given(event(ToolAdded, { toolId: "t-2", model: "D24000", name: "Tile saw" }))
+  .when(command(AddTool, { toolId: "t-2", model: "D24000", name: "Tile saw" }))
+  .then(error("already exists"), noEvents())
+```
+
+A scenario that throws without an `error` claim fails with the thrown error, so a test that expected a refusal and got an exception reports the exception. The caller can be tested with the same app: build the recorded command bus once, read it from `app.commandBuses`, and call the function with it.
+
+```ts
+expect(await rentEndpoint(commandBus!, "t-5", "nobody")).toEqual({
+  status: 404,
+  body: { message: "nobody is not registered" },
+})
+```
+
+## Checking it works
+
+Run the tests from the examples directory:
+
+```sh
+bun test src/guides/refusing-a-command
+```
+
+All five tests pass: the three scenarios and the two caller tests. Changing a reason in the handler to one the enum does not list fails the typecheck before the tests run.
+
+## Related
+
+- [Commands](/docs/kronos-ts/commands) describes handlers, results and the errors a command can fail with.
+- [Messages](/docs/kronos-ts/messages) describes the result schema on a command descriptor.
+- [Testing](/docs/kronos-ts/testing) describes `result`, `error` and `noEvents`.
+- [Test a slice](/docs/kronos-ts/guides/testing-a-slice) tests every refusal of the renting slice.

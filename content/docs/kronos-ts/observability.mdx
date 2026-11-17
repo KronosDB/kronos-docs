@@ -1,0 +1,180 @@
+---
+title: Observability
+description: How Kronos carries correlation between messages, writes structured logs, and exports traces, metrics and logs over OTLP.
+---
+
+Observability in Kronos is four things that work together: correlation metadata that links the messages of one business operation, a structured logger available in handlers, traces, metrics and logs exported over OTLP by `@kronos-ts/otlp`, and the status of each event processor as a health signal. Correlation and logging are in `@kronos-ts/core`. Each is a function that wraps a bus or a handler, and nothing is active until you wrap a bus or handler with it.
+
+Renting a tool involves several messages. A `RentTool` command appends `ToolRented`. A processor delivers `ToolRented` to an event handler that sends `SuspendCustomer`, and that command appends `CustomerSuspended`. Correlation sets the same `correlationId` on all of these messages, and a `causationId` on each that holds the identifier of the message that caused it. A trace records the same chain with timing, and a log line carries both ids so it can be found from either.
+
+## Correlation
+
+Correlation metadata is set by two functions that you apply in two places. `correlation` is applied to a bus and sets the ids on a message when it is sent. `correlatingHandler` is applied to a handler and copies the ids of the handled message onto every message that the handler creates.
+
+```ts
+const commandBus = interceptingCommandBus(localCommandBus(unitOfWork), correlation)
+const queryBus = interceptingQueryBus(localQueryBus(unitOfWork), correlation)
+```
+
+`correlation` goes into `interceptingCommandBus` or `interceptingQueryBus`, as described in [Interception and validation](/docs/kronos-ts/interception-and-validation). It sets `correlationId` and `causationId` to the message identifier, unless the message already carries them. Wrap the intercepting bus around a transport as the outermost layer, so that messages sent over the transport carry the ids as well.
+
+A handler is wrapped at the entry. In the example below `carry` is `correlatingHandler`.
+
+```ts
+const app = kronos({
+  commandHandlers: [
+    { ...rentTool, handler: loggingHandler(carry(rentTool.handler), logger) },
+    { ...suspendCustomer, handler: carry(suspendCustomer.handler) },
+  ].map((entry) => ({ ...entry, eventStore, commandBus, queryBus })),
+  eventHandlers: [
+    { ...suspendOnRental, handler: loggingHandler(carry(suspendOnRental.handler), logger) },
+    { ...logSuspension },
+  ].map((entry) => ({ ...entry, commandBus, queryBus, processor })),
+})
+```
+
+Inside a wrapped handler, `ctx.append`, `ctx.send`, `ctx.query`, `ctx.schedule` and `ctx.scheduleAfter` add the carried metadata to what they create. Metadata that the handler passes to one of those calls itself takes precedence for the same key. Events are stored with their metadata, so the ids are in the log. For the example, the `correlationId` is the identifier of the `RentTool` command on all three messages. The `causationId` of `ToolRented` is that command, and the `causationId` of `CustomerSuspended` is the `SuspendCustomer` command that the event handler sent.
+
+By default a handler carries `correlationId`, `causationId` and, when there is one, `traceparent`. To carry more, pass a function as the second argument of `correlatingHandler` and spread `messageOrigin` into its result, and return string values.
+
+```ts
+export const withActor = correlatingHandler(rentTool.handler, (message) => ({
+  ...messageOrigin(message),
+  actor: String(message.metadata.actor ?? ""),
+}))
+```
+
+A key set at the edge of the system, such as `actor` from an HTTP request, is passed as the metadata argument of `send(bus, descriptor, payload, metadata)`. The function above copies it from each handled message onto each message created, so every message in the chain has it.
+
+A wrapper that writes to `message.metadata`, such as `otlpHandler`, goes outside `correlatingHandler` and `loggingHandler`. The wrong order is a type error, and `kronos()` throws at start-up naming the entry.
+
+## Logging
+
+A handler that needs to log requires `ctx.log` by intersecting `LogCapability` into its context type, and the entry is wrapped by `loggingHandler(handler, logger)`, which supplies it. The logger already carries the fields of the handled message (`message.name`, `message.id`, `message.kind`, `correlationId`, `causationId`), so every record from one handling can be found from the message.
+
+```ts
+export const rentTool = commandHandler(
+  RentTool,
+  async ({ payload }, ctx: CommandHandlerContext & LogCapability) => {
+    ctx.log.info("renting a tool", { toolId: payload.toolId, customerId: payload.customerId })
+    ctx.append(ToolRented, payload)
+  },
+)
+```
+
+`loggingHandler` rejects a handler that does not require `ctx.log`, and rejects wrapping the same handler twice, both as type errors. A `Logger` has the methods `debug`, `info`, `warn` and `error`, each taking a message string and optional fields, and `with(fields)`, which returns a logger that adds those fields to every record.
+
+`consoleLogger` writes one JSON object per record, with `time`, `level` and `message` followed by the fields. Records below `level` are skipped, and the default level is `debug`. Pass `write` to send the lines somewhere other than the console. Any object with the shape of `Logger` works, and `otlpLogger` sends records to a collector.
+
+```ts
+const logger = consoleLogger({ level: "info" })
+```
+
+## OTLP export
+
+`@kronos-ts/otlp` exports traces, metrics and logs to any collector or backend that accepts OTLP over HTTP with a JSON body. It posts with the global `fetch`, which exists in Bun and Node.js, and needs no OpenTelemetry packages.
+
+Create the exporter once for the process and pass it to each wrapper. It buffers spans, log records and measurements and posts them every 5 seconds to `<endpoint>/v1/traces`, `/v1/metrics` and `/v1/logs`.
+
+```ts
+const exporter = otlpExporter({
+  endpoint: "http://localhost:4318",
+  serviceName: "toolstore",
+  resource: { "service.version": "1.4.0", "deployment.environment.name": "production" },
+  sample: 0.25,
+})
+const logger = otlpLogger(exporter, { level: "info" })
+```
+
+`otlpCommandBus` and `otlpQueryBus` wrap a bus and trace each dispatch. `otlpHandler` wraps a handler and traces each handling. The three together trace a message from the caller that sent it to the handler that ran it. A command handler's span nests under the span of its sender. An event handler's span starts a trace of its own with a link to the trace that produced the event, because a processor can deliver an event days after it was appended. `otlpQueryBus` traces `query` only, so a subscription query and its updates are not traced.
+
+```ts
+// otlpHandler goes outermost: it stamps the traceparent that the others read.
+const traced = otlpHandler(loggingHandler(correlatingHandler(rentTool.handler), logger), exporter)
+
+const app = kronos({
+  commandHandlers: [{ ...rentTool, handler: traced, eventStore, commandBus, queryBus }],
+})
+```
+
+The bus wrappers take any bus and return the same kind of bus, so they nest with transports and with `interceptingCommandBus` in the order you write them. With `correlatingHandler` inside `otlpHandler`, the trace context is carried onto every message the handler creates and into the log lines, so a log line appears inside its span in the backend.
+
+`otlpHandler` also supplies `ctx.trace` and `ctx.metrics`, which a handler requires with `TraceCapability` and `MetricsCapability`. `ctx.trace.run(name, fn)` runs a function in a child span of the handler's span.
+
+```ts
+await ctx.trace.run("check-stock", async () => {})
+```
+
+It records three metrics for every handling: `kronos.messages.handled`, `kronos.messages.failed` (also counted in `handled`) and `kronos.message.handler.duration` in milliseconds, each with the attributes `message_type` and `message_name`. A handler adds its own with `ctx.metrics.count(name, attributes?)` and `ctx.metrics.record(name, value, attributes?)`. An attribute holds an outcome, a reason or a provider, never an identifier, because each distinct set of attributes is a separate series.
+
+```ts
+ctx.metrics.count("rentals.started", { customer_type: "member" })
+```
+
+A failed span records an error status with the error's type. The error's message may contain user data, so it is left out unless you give the exporter an `errors` function.
+
+### Sampling
+
+`sample` sets head sampling for traces. A number from 0 to 1 is the share of traces that are recorded, decided from the trace id so that every process reaches the same decision, and a function `(traceId) => boolean` makes the decision itself. The decision is made at the root span and every span under it follows it, in every service the message reaches. Metrics and logs are not sampled, and without the option every trace is recorded.
+
+### Options
+
+All options go to `otlpExporter`.
+
+<TypeTable
+  type={{
+    endpoint: { type: "string", description: "Collector base URL. /v1/traces, /v1/metrics and /v1/logs are appended." },
+    serviceName: { type: "string", description: "The service.name resource attribute." },
+    resource: { type: "Attributes", description: "Extra resource attributes sent once per batch, such as service.version." },
+    headers: { type: "Record<string, string>", description: "Extra HTTP headers on every request, for authentication to a hosted backend." },
+    endpoints: { type: "{ traces?: string; metrics?: string; logs?: string }", description: "Full URL per signal for a backend with a separate URL for each." },
+    sample: { type: "number | ((traceId: string) => boolean)", default: "1", description: "Head sampling for traces, decided at the root." },
+    errors: { type: "(error: unknown) => string", default: "the error's type", description: "What a failed span's status message contains." },
+    metrics: { type: "boolean", default: "true", description: "false exports no metrics. Spans and logs are unaffected." },
+    compression: { type: '"gzip"', description: "Compress every request body." },
+    flushIntervalMs: { type: "number", default: "5000", description: "How often the buffer is posted." },
+    onExportError: { type: '(error: unknown, signal: "traces" | "metrics" | "logs") => void', description: "Called when a POST fails or is rejected." },
+  }}
+/>
+
+### Failure and shutdown
+
+Telemetry never throws into the application. A failed or rejected POST drops that batch, without a retry, and calls `onExportError`. `flush()` posts what is buffered. `close()` stops intake and posts the remainder, so close the exporter after everything that records into it: stop the app and drain the transports first.
+
+```ts
+await app.stop()
+await exporter.close()
+```
+
+When a handler runs through `postgresHandler` inside `otlpHandler`, each statement on `ctx.sql()` becomes a `db.statement` child span, as described in [Postgres](/docs/kronos-ts/infrastructure/postgres).
+
+## Processor health
+
+Each event processor reports its progress as a status, which an HTTP health endpoint or a metrics gauge can read. `app.processors` is a map from name to a running processor, and `status()` on one returns whether it is running, the most recent error that has not recovered, its committed position, whether it has consumed every available event, and whether it is replaying. The error is cleared by the next successful batch.
+
+```ts
+export async function health() {
+  const head = await eventStore.getHeadPosition()
+  const processors = [...app.processors.values()].map((processor) => {
+    const status = processor.status()
+    return {
+      name: processor.name,
+      running: status.running,
+      error: status.error?.message,
+      lag: head - status.position,
+      caughtUp: status.caughtUp,
+    }
+  })
+  const ok = processors.every((processor) => processor.running && processor.error === undefined)
+  return { status: ok ? 200 : 503, processors }
+}
+```
+
+The lag in events is the head position of the event store minus the processor's position. A processor with an `error` has failed a batch since its last success. [Event processors](/docs/kronos-ts/event-processors) describes how failures are retried and dead-lettered.
+
+## Related
+
+- [Interception and validation](/docs/kronos-ts/interception-and-validation) covers `interceptingCommandBus`, `interceptingQueryBus` and the order of wrappers.
+- [Event processors](/docs/kronos-ts/event-processors) covers processor status, segments, retries and dead letters.
+- [Postgres](/docs/kronos-ts/infrastructure/postgres) covers `postgresHandler` and its statement spans.
+- [Assembly](/docs/kronos-ts/assembly) covers wrapping handlers at the entries of `kronos()`.

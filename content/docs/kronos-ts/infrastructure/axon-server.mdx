@@ -1,0 +1,169 @@
+---
+title: Axon Server
+description: The @kronos-ts/axon-server package connects a Kronos application to Axon Server over gRPC for its event store, snapshots, command bus, query bus and processor administration.
+---
+
+`@kronos-ts/axon-server` is the client for Axon Server. It provides an event store over Axon Server's dynamic consistency boundary (DCB) API, a snapshot tier, a command bus and a query bus that route through the server, and a control plane through which the Axon Server dashboard administers your event processors. Each piece is a plain function over one shared connection.
+
+The package is shaped like [the KronosDB package](/docs/kronos-ts/infrastructure/kronosdb) except that it has no scheduling tier. For scheduling, wrap this store with a scheduling store from another package, such as `postgresSchedulingEventStore`.
+
+## Connecting
+
+`axonServerConnection` creates the connection handle. All stores and buses built from it share one gRPC channel, and the context each call addresses is sent as a header, so several contexts can use one channel.
+
+```ts
+const axon = await axonServerConnection({
+  componentName: "toolstore-counter",
+  serializer: jsonSerializer(),
+  host: "axonserver.internal",
+  port: 8124,
+  context: "toolstore",
+  token,
+})
+```
+
+`componentName` is the application name shown on the Axon Server dashboard, and `serializer` encodes every payload this client sends.
+
+## Composition
+
+Build the stores and buses from the handle, assemble the application with `kronos()`, then start the handle. To let the dashboard administer your processors, create the control plane after that:
+
+```ts
+const eventStore = axonServerSnapshottingEventStore(
+  axonServerEventStore(axon, "toolstore"),
+  axon,
+  "toolstore",
+)
+const commandBus = axonServerCommandBus(localCommandBus(unitOfWork), axon, { context: "toolstore" })
+const queryBus = axonServerQueryBus(localQueryBus(unitOfWork), axon, { context: "toolstore" })
+const inventoryView = eventProcessor("inventory-view", eventStore, inMemoryTokenStore(), unitOfWork)
+
+const app = kronos({
+  commandHandlers: [{ ...addTool, eventStore, commandBus, queryBus }],
+  eventHandlers: [{ ...recordAddedTool, eventStore, commandBus, queryBus, processor: inventoryView }],
+})
+
+await axon.start()
+const control = await axonServerControlPlane(axon, app.processors.values() as Iterable<ManagedEventProcessor>)
+```
+
+`axon.start()` has to run after `kronos()`, because `kronos()` subscribes the handlers and each subscription registers the handler with the server. It then waits `busSubscriptionAckDelayMs` for the server to register them. The wait is a fixed delay, because the client cannot detect when Axon Server has registered a subscription. `app.processors` is typed as a map of unknown values, so passing `.values()` needs the cast shown. Processors added to the app after the control plane is created are not addressable from the dashboard.
+
+| Function | Provides |
+| --- | --- |
+| `axonServerEventStore` | The event store of [State and consistency](/docs/kronos-ts/state) over one context. |
+| `axonServerSnapshottingEventStore` | Snapshot storage for states that declare a [snapshot policy](/docs/kronos-ts/snapshots). Wraps a store. |
+| `axonServerCommandBus`, `axonServerQueryBus` | Buses that route through the server. Wrap a local bus. |
+| `axonServerControlPlane` | Lets the dashboard administer your event processors. Optional. |
+
+A dispatch always goes to the server, even for a command this process handles. To handle such a command locally, wrap the bus in `localFirstCommandBus(bus, local)` or `localFirstQueryBus(bus, local)`. Wrap the outermost bus in `interceptingCommandBus(bus, correlation)` so the intercept runs before the message is serialized.
+
+## Contexts
+
+A context is Axon Server's tenancy boundary. `axonServerEventStore(axon, "toolstore")` and `axonServerEventStore(axon, "billing")` share one channel and address different contexts. A store's context argument is required. A bus takes its context from its `context` option, which defaults to the connection's `context`.
+
+## Event store behaviour
+
+Events read back have empty `tags`, because Axon Server indexes tags when it stores an event but does not return them. Reading past the head of the log returns no events and is not an error.
+
+If a gRPC read does not complete within `readTimeoutMs`, the client cancels and retries it once, and a second timeout fails with `ConnectionFailedError`. This guards against a Bun HTTP/2 client defect that intermittently loses the end of a response. Reads are idempotent, so repeating one is safe. Raise `readTimeoutMs` if a single read legitimately takes longer than 15 seconds.
+
+A snapshot is a cache. When the snapshot service has no snapshot, or cannot be reached, the load falls back to a full read from the start of the log and stays correct. A snapshot is written after the transaction it summarizes commits, and writing one removes the earlier ones.
+
+## Command and query buses
+
+A command's metadata can carry `processingInstructions` with a `routingKey`, a `priority` and a `timeoutMs`. Commands with the same routing key go to the same handler, a higher priority is processed first, and the server cancels a command that is not handled within `timeoutMs`. `loadFactor` is the relative share of routed commands this instance receives.
+
+`subscriptionQuery` returns the initial result, then the updates handlers emit with `ctx.emitUpdate`. `emitUpdate` runs after the unit of work commits, and not at all if it rolls back. A bus holds at most 1024 subscriptions it opened and 1024 it serves, and fails the excess with `UnavailableError`. A subscription is not a durable feed: it ends when the channel does, and the subscriber has to query and subscribe again. Use an event processor for changes that must not be missed.
+
+## Control plane
+
+Axon Server can pause and start the event processors of a connected client, split, merge and release their segments, and show their status on the dashboard. `pause-processor` starts the processor's `stop()` and does not wait for it, so a processor can take a moment to stop after the dashboard reports the instruction as sent. An instruction for an unknown processor changes nothing. Segments are described on the [event processors page](/docs/kronos-ts/event-processors), and an instruction for one applies to that processor only.
+
+## Options
+
+<TypeTable
+  type={{
+    componentName: { type: "string", description: "Name of this application, shown on the dashboard. Required." },
+    serializer: { type: "Serializer", description: "Encodes payloads for the wire. Required." },
+    host: { type: "string", default: '"localhost"', description: "Host of the server." },
+    port: { type: "number", default: "8124", description: "The server's gRPC port." },
+    servers: { type: "string[]", description: 'Addresses as "host:port", for a cluster. Overrides host and port. The first is used at start; each reconnection attempt uses the next.' },
+    context: { type: "string", default: '"default"', description: "Context the buses address unless their own context option says otherwise." },
+    clientId: { type: "string", default: "a random UUID", description: "Identifies this process to the server." },
+    token: { type: "string", default: '""', description: "Access token. Sent as the AxonIQ-Access-Token header on every call when set." },
+    ssl: { type: "{ enabled: boolean; certFile?: string; clientCertFile?: string; clientKeyFile?: string }", description: "TLS. certFile is the CA to trust, as a PEM file; without it the system trust store is used. The client certificate and key are for mutual TLS. The files are read once, when the connection is created." },
+    readTimeoutMs: { type: "number", default: "15000", description: "How long a read may take before it is cancelled and retried once." },
+    reconnectIntervalMs: { type: "number", default: "2000", description: "Base delay between reconnection attempts. It doubles per attempt up to 30000." },
+    maxReconnectAttempts: { type: "number", default: "0", description: "Attempts before reconnecting gives up. 0 retries without limit." },
+    busSubscriptionAckDelayMs: { type: "number", default: "1000", description: "How long start() waits for the server to register handler subscriptions." },
+    shutdownTimeoutMs: { type: "number", default: "30000", description: "How long close() waits for in-flight messaging to drain before it closes the channel anyway." },
+  }}
+/>
+
+The command and query buses take an options object as their third argument:
+
+<TypeTable
+  type={{
+    timeoutMs: { type: "number", default: "30000", description: "Client-side deadline for a dispatch. For queries it is also sent to the server as the query's timeout." },
+    context: { type: "string", default: "the connection's context", description: "Context for this bus." },
+    loadFactor: { type: "number", default: "100", description: "Relative share of routed commands this instance receives. Commands only." },
+    limits: { type: "{ maxConcurrentHandlers?: number; maxPendingRequests?: number }", default: "128 and 1024", description: "Inbound handlers running at once, and outbound requests awaiting a response. Excess requests fail with MessagingOverloadedError." },
+  }}
+/>
+
+Two concurrent dispatches on one bus with the same message identifier fail, so use a fresh identifier for each.
+
+## When the connection drops
+
+The client sends a heartbeat to the server and treats a stretch without a response as a lost connection. It then closes the gRPC channel and opens one to the next address in `servers`, waiting after each failed attempt. After `maxReconnectAttempts` it throws `UnavailableError`; with the default of 0 it keeps trying. Calls in flight on the old channel fail, and the client does not send them again. A command or query that failed this way may or may not have run, so the caller decides whether to send it again, and handlers should be idempotent.
+
+Each bus reopens its stream after a reconnect, announces its handler names again and resumes, retrying with growing delays and logging each retry with `console.warn`. An event processor reopens its subscription from its stored token. A subscription query ends, and the subscriber has to subscribe again.
+
+## Shutdown
+
+Stop the application first, close the control plane if you created one, then close the handle.
+
+```ts
+await app.stop()
+await control.close()
+await axon.close()
+```
+
+`axon.close()` rejects new dispatches with `ShutdownInProgressError`, ends the subscriptions this process opened, and waits for running handlers to finish. It waits at most `shutdownTimeoutMs`. If the work has not drained by then, `close()` rejects with an `UnavailableError`, and in either case it closes the channel. Work still running after the timeout continues in this process, and its result is discarded.
+
+## Errors
+
+Check errors with the guards from `@kronos-ts/core`, not with `instanceof`: an application can hold two copies of core, and the guards read the error's `kind`.
+
+```ts
+if (isConflict(error)) return "conflict"
+if (isNoHandler(error)) return "nobody-handles-it"
+if (isUnavailable(error)) return "try-again-later"
+if (error instanceof AuthenticationError) return "bad-token"
+if (error instanceof AxonServerError) return `axon:${error.errorCode}`
+```
+
+| What happened | What the caller receives | What to do |
+| --- | --- | --- |
+| An append's condition was violated; nothing was written | `ConcurrencyError` (`isConflict`) | Load the state again and decide again. |
+| Nothing handles the command or query | `NoHandlerForCommandError` or `NoHandlerForQueryError` (`isNoHandler`) | Check that the handling process called `axon.start()` on the same context. |
+| The server could not respond: gRPC `UNAVAILABLE` or `DEADLINE_EXCEEDED` | `ConnectionFailedError` (`isUnavailable`) | Retry. The request may have run. |
+| The server reports a dispatch failure or no event store leader | `CommandDispatchError`, `QueryDispatchError` or `AxonServerError` (`isUnavailable`) | Retry. |
+| The deadline passed | `UnavailableError`, "Messaging deadline exceeded after Nms" (`isUnavailable`) | Retry. The command may still have run. |
+| A read timed out twice | `ConnectionFailedError` (`isUnavailable`) | Retry, or raise `readTimeoutMs`. |
+| A bus is at `maxConcurrentHandlers` or `maxPendingRequests` | `MessagingOverloadedError` (`isUnavailable`) | Retry later, or raise the limits. |
+| The connection is closing | `ShutdownInProgressError` (`isUnavailable`) | Stop dispatching. |
+| A handler on another instance threw anything else | `CommandExecutionError` or `QueryExecutionError` with the remote message | Report it. |
+| The token is missing or wrong | `AuthenticationError` | Fix the token. |
+| A message exceeds the server's size limit | `AxonServerError` with `transient: false` | Send a smaller payload, or raise the server's limit. |
+
+A subscription query fails its update iterator with `UnavailableError` when the initial result takes longer than `timeoutMs`, when 1024 subscriptions are already open, or when the bus is shutting down.
+
+## Related
+
+- [KronosDB](/docs/kronos-ts/infrastructure/kronosdb) is the package with the same shape for the KronosDB server.
+- [State and consistency](/docs/kronos-ts/state) covers the event store contract, markers and conditional appends.
+- [Event processors](/docs/kronos-ts/event-processors) covers segments, tokens and replays.
+- [Commands](/docs/kronos-ts/commands) and [Queries](/docs/kronos-ts/queries) cover dispatching and handling on any bus.
+- [Snapshots](/docs/kronos-ts/snapshots) covers declaring a snapshot policy on a state.

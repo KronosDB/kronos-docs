@@ -1,0 +1,140 @@
+---
+title: Messages
+description: How commands, events and queries are declared, with their payload schemas, results, tags and metadata.
+---
+
+A message is a payload with a name and metadata. Kronos has three kinds. A command requests a change and is handled by exactly one handler. An event records something that happened, is appended to the event store, and is delivered to any number of event handlers afterwards. A query requests data and always returns a result. You declare each message type once as a descriptor, and every handler, bus and store in the application refers to that descriptor.
+
+This page covers declaring descriptors. [Commands](/docs/kronos-ts/commands) covers handling and sending commands, [Events](/docs/kronos-ts/events) covers event handlers, [Queries](/docs/kronos-ts/queries) covers query handlers, and [State and consistency](/docs/kronos-ts/state) covers how tags select the events a decision reads. Everything on this page is exported from `@kronos-ts/core`.
+
+## The three kinds
+
+The kinds differ in who receives the message, whether a result comes back, and whether the message is stored.
+
+| | Command | Event | Query |
+| --- | --- | --- | --- |
+| Meaning | A request to change something | A fact that happened | A request for data |
+| Received by | One command handler | Every event handler that subscribes, through a processor | One query handler |
+| Result | Optional, declared with `result` | None | Required, declared with `result` |
+| Stored | No | Yes, in the event store, with its tags | No |
+| Tags | No | Yes | No |
+| Created by | `send` or `ctx.send` | `ctx.append` | `query` or `ctx.query` |
+
+A command can be refused. An event cannot, because it exists only after it has been accepted into the log.
+
+## Declaring messages
+
+`withNamespace` returns three constructors, `command`, `event` and `query`, that share one namespace, so a module declares its messages without repeating it:
+
+```ts
+const ns = withNamespace("toolstore")
+
+export const RentTool = ns.command("RentTool", {
+  payload: z.object({ toolId: z.string(), customerId: z.string() }),
+  result: z.discriminatedUnion("rented", [
+    z.object({ rented: z.literal(true) }),
+    z.object({
+      rented: z.literal(false),
+      reason: z.enum(["tool-unavailable", "customer-unknown", "over-limit"]),
+    }),
+  ]),
+})
+
+export const ToolRented = ns.event("ToolRented", {
+  payload: z.object({ toolId: z.string(), customerId: z.string() }),
+  tags: {
+    toolId: (payload) => payload.toolId,
+    customerId: (payload) => payload.customerId,
+  },
+})
+
+export const GetCustomerRentals = ns.query("GetCustomerRentals", {
+  payload: z.object({ customerId: z.string() }),
+  result: z.object({ toolIds: z.array(z.string()) }),
+})
+```
+
+Each constant is a descriptor. You pass it to `commandHandler`, `eventHandler` or `queryHandler` to handle the message, and to `send`, `ctx.append` or `query` to create one.
+
+### Names and versions
+
+A message type is identified by its namespace and local name, written `toolstore.RentTool`. Buses use that string to find the handler and the event store records it with each event, so renaming a message type changes what the application matches.
+
+`version` is a string and defaults to `"1.0"`. It matters for events, which are stored: when an event's payload shape changes, declare a new version and translate old events to it, as [Versioning](/docs/kronos-ts/versioning) describes.
+
+### Payload schemas
+
+The `payload` field accepts any [Standard Schema](https://standardschema.dev) value. Zod, Valibot and ArkType all provide one, and `@kronos-ts/core` depends on none of them. The schema determines the payload type: a handler for `RentTool` receives `{ toolId: string; customerId: string }`, and `ctx.append(ToolRented, payload)` accepts only a payload of the event's shape.
+
+The descriptor does not run the schema. Parsing a payload against it happens where you add `validatingHandler` or call `validate`, as [Interception and validation](/docs/kronos-ts/interception-and-validation) describes.
+
+## Results
+
+Whether a descriptor may declare a `result` depends on its kind:
+
+| Kind | `result` | Effect |
+| --- | --- | --- |
+| Command | Optional | With a schema, `send` and `ctx.send` return its output type and the handler must return it. Without one, the handler returns nothing and the caller gets `unknown`. |
+| Event | Not accepted | An event is a stored fact and has no caller to return a result to. |
+| Query | Required | `query` and `ctx.query` return its output type. |
+
+The result schema is a type for the compiler. Kronos does not parse a handler's return value against it at runtime. [Commands](/docs/kronos-ts/commands#results) describes how a command result reaches the caller.
+
+## Tags
+
+A tag is a key and a value attached to an event, such as `toolId` = `t-1`. Tags select the events a decision depends on: a state reads the events whose tags match, and the append that records the decision succeeds only if no event matching that selection has been appended since the state read it. [State and consistency](/docs/kronos-ts/state) explains that; this section covers how an event gets its tags.
+
+An event descriptor declares its tags as a record. Each key is a tag key. Each value is a function that receives the payload and the metadata the event is created with, and returns a string, an array of strings, or `undefined`:
+
+```ts
+export const ToolsRented = ns.event("ToolsRented", {
+  payload: z.object({
+    customerId: z.string(),
+    toolIds: z.array(z.string()),
+    expedite: z.boolean(),
+  }),
+  tags: {
+    customerId: (payload) => payload.customerId,
+    toolId: (payload) => payload.toolIds,
+    counter: (payload) => (payload.expedite ? "express" : undefined),
+    branch: (_payload, metadata) => (typeof metadata.branch === "string" ? metadata.branch : undefined),
+  },
+})
+```
+
+An event can have several tags, and one key can produce several. An array produces one tag per value under the same key, so `ToolsRented` for two tools carries two `toolId` tags. `undefined` and an empty array produce no tag for that key on that event, which is how a tag can be conditional. The functions run once, when `ctx.append` creates the event, and the resulting tags are stored with it. A function that returns an empty string makes `ctx.append` throw, because a tag key and a tag value must not be empty.
+
+An event descriptor without a `tags` record produces events with no tags. A state that folds an event whose descriptor shares no tag key with the state's own tags fails at startup, as [State and consistency](/docs/kronos-ts/state) describes.
+
+## Metadata
+
+Metadata is a read-only record of string keys to values that is part of a message alongside its payload. It carries information that belongs to the request rather than to the business fact, such as who acted, a tenant or a trace id. You pass it as the optional last argument of `send`, `query`, `ctx.send`, `ctx.query` and `ctx.append`. A message that was not given any carries an empty record.
+
+```ts
+await send(commandBus, AddTool, { toolId: "t-1", model: "DCD791", name: "Cordless drill" }, { actor: "staff-4" })
+```
+
+A handler reads it from the message it receives. This one reads a `source` entry that a bus intercept added, as [Interception and validation](/docs/kronos-ts/interception-and-validation) shows:
+
+```ts
+export const addTool = commandHandler(AddTool, async ({ payload, metadata }, ctx) => {
+  console.log(`handling ${payload.toolId} from ${String(metadata.source)}`)
+  ctx.append(ToolAdded, payload)
+})
+```
+
+Kronos does not copy metadata from the message being handled onto the messages that handling creates. `ctx.send`, `ctx.append` and `ctx.schedule` attach exactly the metadata you pass them, plus whatever a wrapper such as `correlatingHandler` adds, as [Observability](/docs/kronos-ts/observability) describes. Helpers such as `metadataWith` and `mergeMetadata` build new metadata records from existing ones.
+
+## Errors
+
+- A tag function that returns an empty string throws `Tag value must not be empty` from `ctx.append`. A tag function that throws fails the handling the same way.
+- A query definition without a `result` throws a `TypeError` naming the query. This matters only to JavaScript callers, because TypeScript rejects it.
+- A payload that does not match its schema is rejected by `validate` or `validatingHandler` with a `validate: "<name>" failed validation` error, as [Interception and validation](/docs/kronos-ts/interception-and-validation) describes.
+
+## Related
+
+- [Commands](/docs/kronos-ts/commands) handles and sends commands, and describes command results.
+- [State and consistency](/docs/kronos-ts/state) uses tags to select the events a decision reads and its append condition checks.
+- [Events](/docs/kronos-ts/events) and [Queries](/docs/kronos-ts/queries) cover the handlers for the other two kinds.
+- [Versioning](/docs/kronos-ts/versioning) covers event versions and upcasting.
+- [Observability](/docs/kronos-ts/observability) covers correlation metadata.

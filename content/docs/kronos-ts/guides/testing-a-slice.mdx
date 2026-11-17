@@ -1,0 +1,161 @@
+---
+title: Test a slice
+description: Test the renting rules and the inventory projection with given/when/then scenarios and a storyline from @kronos-ts/test.
+---
+
+When you are done, the renting slice has a test for its success path and for each of its three refusals, and the inventory projection has a test that shows a rented tool as unavailable and a storyline that follows it as events are appended. You need the tool store from [Getting started](/docs/kronos-ts/getting-started), the `bun test` runner, and `@kronos-ts/test` installed:
+
+```sh
+bun add -d @kronos-ts/test
+```
+
+## Build the slice for a test
+
+A scenario runs against an assembled app, so the test builds the slice the way a process would, with two differences. The event store is wrapped in `recordingEventStore` and the command bus in `recordingCommandBus`, which is how the fixture records what the app did. Put that in `app.ts` as a function, so each test can build its own copy:
+
+```ts
+export function rentingSlice() {
+  const eventStore = recordingEventStore(inMemoryEventStore())
+  const commandBus = recordingCommandBus(localCommandBus(unitOfWork))
+  const queryBus = localQueryBus(unitOfWork)
+  const inventoryView = eventProcessor("inventory-view", eventStore, inMemoryTokenStore(), unitOfWork)
+```
+
+The rest of the function is the entries from [Getting started](/docs/kronos-ts/getting-started), each carrying the recorded objects. The inventory map is created inside the function, so each app starts empty. [Testing](/docs/kronos-ts/testing) describes what the fixture requires of an app.
+
+## Create a fixture per test
+
+The fixture never stops the app, so the test does. Keep the apps a test builds in a list and stop them after each test:
+
+```ts
+const running: Array<{ stop(): Promise<void> }> = []
+afterEach(async () => {
+  await Promise.all(running.splice(0).map((app) => app.stop()))
+})
+
+function freshFixture() {
+  const app = rentingSlice()
+  running.push(app)
+  return fixture(app)
+}
+```
+
+A new app for each test means each test starts with an empty log and empty read models.
+
+## Name the facts
+
+Most scenarios start from the same few events. Declare them once as values, and use them in `given`:
+
+```ts
+const drill = event(ToolAdded, { toolId: "t-1", model: "DCD791", name: "Cordless drill" })
+const tileSaw = event(ToolAdded, { toolId: "t-2", model: "D24000", name: "Tile saw" })
+const ada = event(CustomerRegistered, { customerId: "ada", name: "Ada", maxRentals: 1 })
+```
+
+Ada's limit is one rental, which makes the limit rule easy to reach.
+
+## Test the success path
+
+The first scenario gives a tool and a customer, rents the tool, and claims both the result and the event that was appended:
+
+```ts
+await freshFixture()
+  .given(drill, ada)
+  .when(command(RentTool, { toolId: "t-1", customerId: "ada" }))
+  .then(result({ rented: true }), events(event(ToolRented, { toolId: "t-1", customerId: "ada" })))
+```
+
+## Test each refusal
+
+A refusal is a command result, so each one is a `result(...)` claim. Each also claims `noEvents()`, because a refused rental must not record anything. Each scenario gives only the facts that lead to its refusal.
+
+A tool the store never added:
+
+```ts
+await freshFixture()
+  .given(ada)
+  .when(command(RentTool, { toolId: "t-1", customerId: "ada" }))
+  .then(result({ rented: false, reason: "tool-unavailable" }), noEvents())
+```
+
+A tool that is already out with another customer:
+
+```ts
+await freshFixture()
+  .given(drill, ada, event(CustomerRegistered, { customerId: "linus", name: "Linus", maxRentals: 1 }))
+  .given(event(ToolRented, { toolId: "t-1", customerId: "linus" }))
+  .when(command(RentTool, { toolId: "t-1", customerId: "ada" }))
+  .then(result({ rented: false, reason: "tool-unavailable" }), noEvents())
+```
+
+A customer who was never registered:
+
+```ts
+await freshFixture()
+  .given(drill)
+  .when(command(RentTool, { toolId: "t-1", customerId: "ada" }))
+  .then(result({ rented: false, reason: "customer-unknown" }), noEvents())
+```
+
+A customer at their limit who rents a second tool:
+
+```ts
+await freshFixture()
+  .given(drill, tileSaw, ada, event(ToolRented, { toolId: "t-1", customerId: "ada" }))
+  .when(command(RentTool, { toolId: "t-2", customerId: "ada" }))
+  .then(result({ rented: false, reason: "over-limit" }), noEvents())
+```
+
+The second scenario uses `given` twice. The calls accumulate in order, and every event is appended and handled before the command is sent.
+
+## Test the projection
+
+A projection is tested through its query. The scenario gives the events that built the read model, sends `GetInventory`, and claims the result. The `given` events reach the projection through its processor, and the fixture waits until the processor has handled them before it sends the query, so the test does not sleep or poll:
+
+```ts
+await freshFixture()
+  .given(drill, tileSaw, ada, event(ToolRented, { toolId: "t-1", customerId: "ada" }))
+  .when(query(GetInventory, {}))
+  .then(
+    result([
+      { toolId: "t-1", name: "Cordless drill", available: false },
+      { toolId: "t-2", name: "Tile saw", available: true },
+    ]),
+  )
+```
+
+To test the read model as it changes, use a storyline. It starts from the query, and each `after` appends events and waits for the projection to handle them before the next `shows` checks the result:
+
+```ts
+await freshFixture()
+  .storyline(query(GetInventory, {}))
+  .shows([])
+  .after(drill)
+  .shows([{ toolId: "t-1", name: "Cordless drill", available: true }])
+  .after(ada, event(ToolRented, { toolId: "t-1", customerId: "ada" }))
+  .shows([{ toolId: "t-1", name: "Cordless drill", available: false }])
+```
+
+If a beat fails, the error names it and the steps before it.
+
+## Checking it works
+
+Run the tests:
+
+```sh
+bun test src/guides/testing-a-slice
+```
+
+```text
+ 7 pass
+ 0 fail
+```
+
+To produce a failure message, change the `customerId` in the `ToolRented` claim of the success scenario to `linus`. The output starts with the scenario as a sentence, `given ToolAdded, CustomerRegistered, when RentTool, then a result, ToolRented`, lists the expected and appended events, and prints `customerId: expected "linus", got "ada"` under the payload differences.
+
+## Related
+
+- [Testing](/docs/kronos-ts/testing) describes fixtures, claims, storylines, time and failure messages.
+- [Refuse a command](/docs/kronos-ts/guides/refusing-a-command) explains why refusals are results.
+- [Organize an app into slices](/docs/kronos-ts/guides/slices-and-modules) builds the entries a test app can reuse.
+- [Event processors](/docs/kronos-ts/event-processors) describes how the projection receives events.

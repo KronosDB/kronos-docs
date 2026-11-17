@@ -1,0 +1,15 @@
+{
+  "title": "Guides",
+  "defaultOpen": true,
+  "pages": [
+    "slices-and-modules",
+    "refusing-a-command",
+    "testing-a-slice",
+    "running-on-postgres",
+    "projecting-into-tables",
+    "replaying-a-projection",
+    "running-on-kronosdb",
+    "across-processes",
+    "changing-an-event"
+  ]
+}

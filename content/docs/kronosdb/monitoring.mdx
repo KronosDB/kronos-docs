@@ -1,0 +1,146 @@
+---
+title: Monitor a server
+description: Probe a KronosDB node, scrape its metrics, read its logs and hardware findings, and alert on the signals that need a person.
+---
+
+By the end of this guide a KronosDB node has liveness and readiness probes, a Prometheus scrape, structured logs, and a small set of alerts. You need a running node and, for the scrape and alerts, a Prometheus. The probes and metrics are all on the admin port (9240 by default), need no credentials, and expose counts and states, never event payloads.
+
+## Wire the probes
+
+`/health` is a liveness probe. It returns `ok` with status 200 for as long as the process is up. `/ready` is a readiness probe. It returns `ready` with status 200 only when a committed leader claim exists that this node can execute or forward writes to, and 503 with `not ready: native leader claim unavailable` during an election, catch-up or startup recovery.
+
+In Kubernetes, use `/ready` for the startup probe as well, with a generous failure threshold, because a node recovering a large data directory is not ready for a while. The chart already sets these.
+
+```yaml
+livenessProbe:
+  httpGet: { path: /health, port: 9240 }
+readinessProbe:
+  httpGet: { path: /ready, port: 9240 }
+startupProbe:
+  httpGet: { path: /ready, port: 9240 }
+  failureThreshold: 60
+  periodSeconds: 5
+```
+
+Set `terminationGracePeriodSeconds` above the drain deadline, which is 20 seconds by default, for example 30. The image's own `HEALTHCHECK` calls `/health`, which does not indicate whether writes work, so a Compose or Swarm deployment should override it with `/ready`, as in [Run a cluster](/docs/kronosdb/clustering).
+
+## Scrape metrics
+
+`/metrics` is Prometheus text format. Per-context metrics carry a `context` label, and the node-wide ones carry none.
+
+```yaml
+scrape_configs:
+  - job_name: kronosdb
+    scrape_interval: 30s
+    static_configs:
+      - targets: ["node1:9240", "node2:9240", "node3:9240"]
+```
+
+With the Prometheus Operator, set `serviceMonitor.enabled=true` in the chart.
+
+The metrics worth watching are these.
+
+| Metric | Type | Meaning |
+| --- | --- | --- |
+| `kronosdb_head_position` | gauge | Next position after what a majority has committed. Events below it are acknowledged and readable. |
+| `kronosdb_replication_lag_events` | gauge | Events this node holds that a majority does not yet hold. |
+| `kronosdb_events_appended_total` | counter | Events appended. |
+| `kronosdb_dcb_violations_total` | counter | Appends rejected by a consistency condition. |
+| `kronosdb_ack_degradations_total` | counter | Appends acknowledged after the write instead of after the fsync because the disk was behind. |
+| `kronosdb_engine_poisoned` | gauge | 1 after an fsync failure. The context rejects every write until the node restarts. |
+| `kronosdb_data_dir_bytes` | gauge | Bytes on disk under the context's directory. |
+| `kronosdb_raft_leader_known` | gauge | 1 when the node has a leader. |
+| `kronosdb_raft_is_leader` | gauge | 1 when this node is the leader. |
+| `kronosdb_native_epoch` | gauge | Rises by at least one for each new leader. |
+| `kronosdb_native_write_gate_open` | gauge | 1 when this node may execute appends locally, which is true on the leader only. |
+| `kronosdb_hardware_finding{check,severity}` | gauge | 1 for each startup check that found something, listed below. |
+| `kronosdb_auth_authenticated_total{method}` | counter | Handshakes that succeeded, by `token`, `jwt` or `mtls`. |
+| `kronosdb_auth_rejected_total{reason}` | counter | Requests rejected, by `unauthenticated` or `permission_denied`. |
+
+## Read the logs
+
+Logs go to standard output. The default is human-readable text. Set `KRONOSDB_LOG_FORMAT=json` for one JSON object per line, ready for a log shipper. In that format the message is under `fields.message`, and the structured values of the line, such as `listen` or `check`, sit beside it in `fields`.
+
+`RUST_LOG` sets the filter and defaults to `kronosdb=info,warn`, which is info for the server and warnings from everything else. A level applies to a crate, so `RUST_LOG=kronosdb=debug,warn` turns on debug output from the server only.
+
+Notable log lines:
+
+| Level | Message | Meaning |
+| --- | --- | --- |
+| info | `KronosDB starting` | Startup summary: version, listen and admin addresses, data directory, TLS, authentication methods, contexts, single or multi-node. |
+| warn | `authentication is DISABLED ...` | The client port has no credentials configured. |
+| warn | `admin console/API auth is DISABLED ...` | The admin port has mode `none`. |
+| warn | `hardware: <check>: <message>` | A startup hardware finding. Error level for `memory_filesystem`. |
+| warn | `drain deadline exceeded with connections still open; exiting now` | Clients did not disconnect within the drain deadline. |
+| warn | `command sweep: cancelled in-flight commands past deadline` | Commands outlived twice the command timeout and were cancelled. |
+| warn | `manifest changed but does not parse; keeping previous state` | A manifest edit was invalid and was ignored. |
+
+## Check the hardware findings
+
+At startup each node times writes to its data directory and inspects its environment. The result decides what `ack-mode = auto` means in a cluster, and it is reported three ways: as the log lines above, as `kronosdb_hardware_finding` on `/metrics`, and under `hardware` in `GET /api/v1/node`, which also holds the measured latencies. Dev mode lowers the log level of the findings to info and changes nothing else.
+
+| Check | Severity | Raised when |
+| --- | --- | --- |
+| `memory_filesystem` | critical | The data directory is on tmpfs or another in-memory filesystem, so nothing survives a restart. |
+| `network_filesystem` | warning | The data directory is on a network or userspace filesystem, whose fsync behavior may not be durable. |
+| `slow_fsync` | warning | The probe's fdatasync p99 is 5 ms or more. |
+| `probe_failed` | warning | The probe could not run or timed out. Written acknowledgements are kept in clusters. |
+| `platform_macos` | warning | The node runs on macOS, where every commit is a full fsync. Development only. |
+| `low_memory` | warning | The index and bloom cache budgets are more than half of the node's memory, or of its cgroup limit. |
+| `swap_in_use` | warning | 64 MiB or more of swap is in use. |
+| `cpu_limit` | warning | A cgroup CPU limit is below the host's CPU count, which causes latency spikes once the quota is spent. |
+| `few_cores` | warning | Fewer than two CPUs are available. |
+
+## Look at system events
+
+The server records some of its own state as events in each context's log, with types that begin with `$`: `$schedule.created`, `$schedule.cancelled` and `$schedule.fired` for scheduled events, and `$snapshot.written` for snapshots. Clients cannot read them, and they never appear in a read or a subscription. The Events page of the admin console lists them. They take log positions like any event, so `kronosdb_head_position` can be higher than the position clients report as the head.
+
+## Set alerts
+
+Three conditions need a person: a poisoned engine, stalled writes and a disk that is filling. With `alerts.enabled=true` the chart installs a `PrometheusRule` with these alerts except the third, which is worth adding, and a disk alert that fires when a data volume has less than 20 percent free for 10 minutes. The replication lag and DCB rejection thresholds are the chart values `alerts.replicationLagEvents` and `alerts.dcbRejectionsPerSecond`, which default to the 100000 and 10 shown.
+
+```yaml
+groups:
+  - name: kronosdb
+    rules:
+      - alert: KronosDBEnginePoisoned
+        expr: max by (context) (kronosdb_engine_poisoned) > 0
+        for: 1m
+        labels: { severity: critical }
+      - alert: KronosDBWritesStalled
+        expr: max(kronosdb_native_write_gate_open) == 0
+        for: 2m
+        labels: { severity: critical }
+      - alert: KronosDBNoLeaderKnown
+        expr: kronosdb_raft_leader_known == 0
+        for: 2m
+        labels: { severity: critical }
+      - alert: KronosDBReplicationLagGrowing
+        expr: max by (context) (kronosdb_replication_lag_events) > 100000
+        for: 5m
+        labels: { severity: warning }
+      - alert: KronosDBAckDegradation
+        expr: sum by (context) (rate(kronosdb_ack_degradations_total[5m])) > 0
+        for: 5m
+        labels: { severity: warning }
+      - alert: KronosDBDCBRejectionSpike
+        expr: sum by (context) (rate(kronosdb_dcb_violations_total[5m])) > 10
+        for: 10m
+        labels: { severity: info }
+```
+
+A poisoned engine is not visible to the probes: the process is up and `/health` returns `ok`, while every append fails until the node restarts. Check the volume before restarting it. A stalled write gate means no node can accept appends, which is a lost majority or an election that is not finishing, and reads continue meanwhile. `kronosdb_raft_leader_known == 0` is the per-node view of the same problem and is not in the chart's rules.
+
+The disk alert matters because the store never deletes, and a full disk ends in a failed fsync and a poisoned engine. Outside the chart, alert on the volume metrics your platform exposes when a volume has less than 20 percent free, and use `kronosdb_data_dir_bytes` to plan its growth.
+
+A sustained rise in `kronosdb_dcb_violations_total` is informational. It means many appends are rejected because events matching their condition were appended after the position they read, so the consistency boundaries of those commands overlap often. No change on the server reduces it. A rising `kronosdb_ack_degradations_total` means the disk is slow, and append latency increases.
+
+## Checking it works
+
+`curl -s localhost:9240/metrics | grep -c '^kronosdb_'` prints a positive count. Stop a node and Prometheus shows `up == 0` for its target. Run `curl -s localhost:9240/api/v1/node | jq .hardware.findings` to list this node's findings, and `jq .ready` on the same output matches `/ready`. In a cluster, `max(kronosdb_native_write_gate_open)` is 1 in steady state.
+
+## Related
+
+- [Admin console](/docs/kronosdb/admin-console): the screens behind the monitoring data.
+- [Run a cluster](/docs/kronosdb/clustering): watching a failover.
+- [Configuration](/docs/kronosdb/configuration): logging, timeouts and `dev`.

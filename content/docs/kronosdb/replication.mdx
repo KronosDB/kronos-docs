@@ -1,0 +1,67 @@
+---
+title: Clustering and replication
+description: Node roles, what a client experiences during a failover, the consistency a cluster gives, and what happens when a majority is lost.
+---
+
+A KronosDB cluster is a set of nodes that each hold a full copy of every context's log. One node, the leader, accepts all appends and sends what it writes to the others, which are followers. An append is acknowledged once a majority of the voting nodes have it.
+
+A node started on its own is a cluster of one that elects itself at once, so a single server can be grown into a cluster without a change on the client. This page describes what a cluster gives an application, [Clustering](/docs/kronosdb/clustering) shows how to set one up, and [Back up and restore](/docs/kronosdb/backups) covers copies kept off the cluster.
+
+## Roles
+
+A node is a voter or a learner. Voters take part in elections and count toward the majority an append needs. A learner replicates every context and can serve reads, but never counts toward the majority and never votes, so adding or losing a learner does not change what an append waits for. A learner suits a passive copy kept for backup.
+
+A cluster of `n` voters needs `n / 2 + 1` of them, rounded down, to elect a leader and to acknowledge an append. Three voters tolerate one failure and five tolerate two. An even number of voters tolerates no more failures than the odd number below it.
+
+## Writing
+
+All appends are executed by the leader, and a client may be connected to any node. A follower that receives an append forwards it, together with its condition, to the leader and returns the leader's response to the client. The leader evaluates the condition of every append against its own log, so there is one place in the cluster where the order of events and the checks against that order are decided.
+
+The leader acknowledges an append when a majority of the voters have its events. With `ack-mode = durable` that means a majority has fsynced them, and with `written` a majority has written them and the fsync follows within moments, as described under [durability](/docs/kronosdb/events-and-tags#durability).
+
+## Failover
+
+When the leader fails or loses its connection to a majority, the remaining voters elect a new leader. It has to finish a few steps before it accepts appends, so an append sent in the meantime fails with `unavailable` and nothing is written. The client retries it, and the failover usually completes within a few seconds.
+
+A failover has these effects on a client:
+
+- A connection to the failed node closes. The client reconnects to any node, and registrations and subscriptions are made again.
+- An append sent while the election runs fails with `unavailable` and nothing is written.
+- An append that was in flight when leadership was lost fails with `unavailable` and an unknown outcome. The events may have been committed, or may have been discarded. Retrying with the same condition resolves it, as described under [errors](/docs/kronosdb/events-and-tags#errors).
+- A subscription on a surviving node continues, and a subscription on the failed node ends and is resumed from the position the client stored.
+- Commands in flight to handlers on the failed node fail, and the sender retries them. The failed node's handlers are removed, so the retry reaches another handler.
+
+No acknowledged event is lost in a failover. An append is acknowledged when a majority has its events, and any majority of the voters overlaps with the majority that elects the new leader, so every acknowledged event is in the new leader's log. A deposed leader that had written more events than it could confirm drops them when it rejoins, and a client that was waiting for one of those appends gets `unavailable`.
+
+## Consistency
+
+A cluster stays consistent at the cost of availability. The leader acknowledges an append only when a majority of the voters have it, so a partition that leaves the leader in a minority cannot commit anything, and the minority cannot elect a leader of its own. There is never a second leader that acknowledges appends in parallel. A leader that has been replaced but has not yet learned it cannot get followers to accept its writes and cannot assemble a majority, so it cannot acknowledge an append.
+
+All conditions are evaluated by one leader against one log, so a conditional append has the same meaning in a cluster as on a single node: either no matching event was stored after the marker, or the append fails with a conflict. A conflict is not reported for an event until a majority has that event, so a client never receives a conflict for an event that a failover could remove.
+
+Reads are served by the node a client is connected to, from its own log, and only up to the committed position that node has received. A read never returns an event that could still be lost. A follower can be slightly behind the leader, so a read on a follower right after an acknowledged append may not yet return that append. A client that needs to read its own writes reads from the node that took them or waits for the position the append returned.
+
+## Quorum loss
+
+When a majority of the voters is unreachable, writes stop and reads continue. Appends wait and then fail with `unavailable`, and no new leader can be elected without a majority. The nodes that are up keep serving reads and subscriptions from their local logs, up to the last committed position they received, so readers receive a log that has stopped growing, not errors.
+
+A node reports itself not ready on `/ready` while no node can accept writes, and `kronosdb_native_write_gate_open` is 0 on every node. Writes resume once a majority is back and a leader has finished taking over.
+
+## Membership changes
+
+An operator adds and removes nodes through the admin API or the admin console. A node can be added as a learner, which catches up with the leader, and then as a voter. A change to the set of voters makes appends fail with `unavailable` for a short time. [Run a cluster](/docs/kronosdb/clustering#add-or-remove-a-voter) describes the steps and what is checked.
+
+## Errors
+
+| Failure | When |
+| --- | --- |
+| `unavailable` | An election is running, a new leader is taking over, a membership change is in progress, a majority is unreachable, or leadership was lost during an append. |
+| `corrupted` | A replicated record failed its checksum. |
+| `internal` | An fsync failure poisoned the event store, or a node found that its log holds a leader term beyond the cluster's current one. |
+
+## Related
+
+- [Clustering](/docs/kronosdb/clustering) shows how to run a cluster.
+- [Events and tags](/docs/kronosdb/events-and-tags) describes conditional appends and acknowledgement modes.
+- [Monitoring](/docs/kronosdb/monitoring) lists the metrics and alerts.
+- [Security](/docs/kronosdb/security) covers the credentials nodes use with each other.

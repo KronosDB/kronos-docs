@@ -1,0 +1,112 @@
+---
+title: Back up and restore
+description: Copy a KronosDB data directory, keep a passive-backup learner, and upload sealed segments to an object store.
+---
+
+KronosDB has no backup or restore command. The supported backup is a copy of a node's data directory, taken from a volume snapshot or a file copy, and the supported restore is putting that directory on a fresh volume and starting the server on it. Two further mechanisms keep copies off the node while it runs: a passive-backup learner that replicates every context, and an upload of sealed segments to an object store. This guide covers all three and lists what each one does not cover.
+
+## What a node stores
+
+Each context is a subdirectory of the data directory (`--data-dir`, `/data` in the image) that holds its event log. The cluster's membership is stored in `raft` directories inside the data directory, so a backup is always of the whole data directory.
+
+The server holds an exclusive lock on the data directory and refuses to start when another live process has it, so two nodes must never share a volume.
+
+The store does not delete events, so a data directory only grows. Watch `kronosdb_data_dir_bytes` per context and size the volume for it.
+
+## Copy the data directory
+
+A copy taken while the node is running is safe when it is crash-consistent, meaning every file comes from one instant, as a CSI volume snapshot or a filesystem snapshot gives you. A file-by-file copy of a running node is not, so stop the node first.
+
+On Kubernetes, snapshot the volume of each pod to back up. The chart names the volume claim `data`, so pod `kronosdb-0` uses the claim `data-kronosdb-0`.
+
+```yaml
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshot
+metadata:
+  name: kronosdb-0-snapshot
+spec:
+  volumeSnapshotClassName: csi-snapclass
+  source:
+    persistentVolumeClaimName: data-kronosdb-0
+```
+
+With Docker, stop the node and archive its volume. The `tar` runs as root inside a throwaway container, so file ownership is kept.
+
+```sh
+docker stop --time 30 kronosdb
+docker run --rm -v kronosdb-data:/data:ro -v "$PWD/backup":/backup \
+  debian:bookworm-slim tar -C /data -czf /backup/kronosdb-data.tar.gz .
+docker start kronosdb
+```
+
+## Restore a data directory
+
+To restore, place the saved directory on a fresh volume and start the server with that volume as its data directory. The server reads the contexts from the directory, so nothing needs to be declared again.
+
+```sh
+docker volume create kronosdb-restored
+docker run --rm -v kronosdb-restored:/data -v "$PWD/backup":/backup \
+  debian:bookworm-slim tar -C /data -xzf /backup/kronosdb-data.tar.gz
+docker run -d --name kronosdb-restored \
+  -p 50051:50051 -p 9240:9240 \
+  -v kronosdb-restored:/data \
+  ghcr.io/kronosdb/kronosdb:0.11.0
+```
+
+On Kubernetes, create a volume from the snapshot and mount it as the pod's data volume. The restored node continues from the last position it had in the copy, so events appended after the copy was taken are not in it.
+
+There is no point-in-time restore and no command that rewinds a log to an earlier position. An event appended by mistake stays in the log.
+
+## Keep a passive-backup learner
+
+A learner is a node that replicates every context from the leader and never votes, so it does not count toward the majority and a slow or lost learner does not delay writes. It keeps its own data directory, which you can snapshot like any other, and it needs no object store. Run it in another zone for a copy that survives the loss of the cluster's zone.
+
+With Helm, set the number of learners. They are the pods `kronosdb-learner-0` and up, with node ids from 101. The chart sets `KRONOSDB_CLUSTER_LEARNERS` on every pod, and each node tries once when it starts to add those learners to the cluster. Only the attempt made on the leader succeeds, and a failed attempt is not retried, so a learner that is not a member after the cluster has started is added with `POST /api/cluster/add-learner`.
+
+```yaml
+learners:
+  replicas: 1
+```
+
+Without Helm, start the learner with the node type `passive-backup`, an unused id and the voters as its peers, attach it to the voters' network (here the Compose project's `kronosdb_default`), and register it with the voters. The voters add learners named in `KRONOSDB_CLUSTER_LEARNERS` when they start, and `POST /api/cluster/add-learner` adds one to a running cluster.
+
+```sh
+docker run -d --name kronosdb-learner \
+  --network kronosdb_default \
+  -v kronosdb-learner-data:/data \
+  -e KRONOSDB_CLUSTER_NODE_TYPE=passive-backup \
+  -e KRONOSDB_CLUSTER_NODE_ID=101 \
+  -e KRONOSDB_CLUSTER_PEERS=1=node1:50051,2=node2:50051,3=node3:50051 \
+  -e KRONOSDB_ACCESS_TOKEN="$KRONOSDB_ACCESS_TOKEN" \
+  ghcr.io/kronosdb/kronosdb:0.11.0
+```
+
+A learner copies whatever the cluster contains, including a mistake, so it protects against losing nodes and not against bad writes.
+
+## Upload sealed segments to an object store
+
+Setting a backup URL makes the leader upload the log to an object store as segments of it become final. A pass runs every `interval-secs`, and changing leader uploads nothing twice.
+
+```toml
+[backup]
+url = "s3://toolstore-backups/kronosdb"
+interval-secs = 30
+```
+
+The URL also takes `gs://` and `file://` forms, for example `file:///backups/kronosdb`. Credentials for a cloud store come from the provider's standard environment variables on the node. With Helm, `backup.url` and `backup.intervalSecs` set the two values, and `backup.credentialsSecret` names a secret whose keys become environment variables on the pods.
+
+Each context gets a prefix under the URL, with its segment files under `<context>/segments/` and a `<context>/manifest.json` that lists them. A segment the manifest does not list is not part of the backup.
+
+The upload is write-only. The server has no command that reads the files back, and the upload does not include the segment being written or the `raft` directories, so it is not by itself a restorable copy of a node. Use it as an off-site copy of the sealed log, together with a copy of the data directory.
+
+## Checking it works
+
+After a copy and restore, start the restored node and open its Contexts page. Each context is listed with the head position it had when the copy was taken. `curl http://localhost:9240/ready` prints `ready`, and a client reads the events up to that position.
+
+For the upload, the startup log has the line `segment backup enabled` with the URL and the interval. Once a context has sealed a segment, which at the default size is after 256 MiB, the object store holds `<context>/segments/` files and a `manifest.json`. To test it sooner, lower `--segment-size` on a test node.
+
+## Related
+
+- [Configuration](/docs/kronosdb/configuration): the `[backup]` settings and `segment-size`.
+- [Run a cluster](/docs/kronosdb/clustering): voters, learners and membership.
+- [Monitor a server](/docs/kronosdb/monitoring): disk growth and the other signals to alert on.

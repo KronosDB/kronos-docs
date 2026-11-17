@@ -1,0 +1,176 @@
+---
+title: Organize an app into slices
+description: Write each feature as a slice value, group slices into modules, and assemble them in one composition root.
+---
+
+When you are done, each feature of the tool store is in one file that exports a slice, related slices are grouped into modules, and a single composition root passes everything to `kronos()`. You need a working application such as the one in [Getting started](/docs/kronos-ts/getting-started). A slice, a module and the composition root are plain TypeScript in your repository; `kronos()` takes three flat lists of entries and has no slice or module type.
+
+## Write a slice
+
+A slice is one feature: the descriptors it declares, the state it decides from, and the handlers that implement it. It does not reference deployment, so it names no event store, bus or processor. Start with the type and a constructor that fills in the lists a slice leaves out, in `slice.ts`:
+
+```ts
+import type { CommandHandler, EventHandler, QueryHandler } from "@kronos-ts/core"
+
+export type Slice = {
+  commandHandlers: CommandHandler<any, any>[]
+  queryHandlers: QueryHandler<any, any>[]
+  eventHandlers: { processor: string; handler: EventHandler<any> }[]
+}
+
+export function slice(parts: Partial<Slice>): Slice {
+  return {
+    commandHandlers: parts.commandHandlers ?? [],
+    queryHandlers: parts.queryHandlers ?? [],
+    eventHandlers: parts.eventHandlers ?? [],
+  }
+}
+```
+
+An event handler in a slice names its processor with a string, which sets which handlers share a processor. The module supplies the stores.
+
+The `add-tool.ts` file holds the whole feature: its command, its event, the `Tool` state, the handler, and the exported slice. Only the slice and the messages other slices need are exported.
+
+```ts
+const Tool = state({
+  id: { toolId: z.string() },
+  tags: (id) => ({ toolId: id.toolId }),
+  evolve: [
+    () => ({ exists: false }),
+    [ToolAdded, (tool) => ({ ...tool, exists: true })],
+  ],
+})
+
+const addTool = commandHandler(AddTool, async ({ payload }, ctx) => {
+  const tool = await ctx.load(Tool, { toolId: payload.toolId })
+  if (tool.exists) throw new Error(`tool ${payload.toolId} already exists`)
+  ctx.append(ToolAdded, payload)
+})
+
+export const addToolSlice = slice({ commandHandlers: [addTool] })
+```
+
+`Tool` and `addTool` are private to the file. A state appears in no list, because `ctx.load(Tool, ...)` takes it as an argument.
+
+## Share events between slices
+
+Slices share data through events. The `rent-tool.ts` slice decides from facts recorded by other slices, so it imports their events and folds them in its own state:
+
+```ts
+import { ToolAdded } from "./add-tool"
+import { CustomerRegistered } from "./register-customer"
+import { slice } from "./slice"
+```
+
+The renting slice exports its command, its result and its event, and keeps `Renting` and `rentTool` private:
+
+```ts
+export const rentToolSlice = slice({ commandHandlers: [rentTool] })
+```
+
+## Add a read model slice
+
+A slice with a projection has event handlers and query handlers. The `inventory.ts` slice puts both its event handlers on a processor named `inventory-view`:
+
+```ts
+export const inventorySlice = slice({
+  queryHandlers: [getInventory],
+  eventHandlers: [
+    { processor: "inventory-view", handler: recordAddedTool },
+    { processor: "inventory-view", handler: recordRentedTool },
+  ],
+})
+```
+
+## Group slices into a module
+
+A module takes the infrastructure and returns the entries for its slices. It is where infrastructure is attached: the event store each command handler loads from, the buses each entry uses, and the processor each event handler runs on. The shared part is written once, in `module.ts`:
+
+```ts
+export type Infrastructure = {
+  eventStore: EventStore
+  tokenStore: TokenStore
+  unitOfWork: () => UnitOfWork
+  commandBus: CommandBus
+  queryBus: QueryBus
+}
+```
+
+```ts
+export function entriesOf(infrastructure: Infrastructure, slices: Slice[]) {
+  const { eventStore, tokenStore, unitOfWork, commandBus, queryBus } = infrastructure
+
+  const processors = new Map<string, ReturnType<typeof eventProcessor>>()
+  const processorNamed = (name: string) => {
+    if (!processors.has(name)) processors.set(name, eventProcessor(name, eventStore, tokenStore, unitOfWork))
+    return processors.get(name)!
+  }
+
+  return {
+    commandHandlers: slices
+      .flatMap((each) => each.commandHandlers)
+      .map((handler) => ({ ...handler, eventStore, commandBus, queryBus })),
+    queryHandlers: slices
+      .flatMap((each) => each.queryHandlers)
+      .map((handler) => ({ ...handler, eventStore, queryBus })),
+    eventHandlers: slices
+      .flatMap((each) => each.eventHandlers)
+      .map(({ processor, handler }) => ({ ...handler, commandBus, queryBus, processor: processorNamed(processor) })),
+  }
+}
+```
+
+A module is then a function that names its slices. This tool store has a catalog of tools and a set of rentals:
+
+```ts
+export const catalogModule = (infrastructure: Infrastructure) =>
+  entriesOf(infrastructure, [addToolSlice, inventorySlice])
+```
+
+```ts
+export const rentalsModule = (infrastructure: Infrastructure) =>
+  entriesOf(infrastructure, [registerCustomerSlice, rentToolSlice])
+```
+
+## Assemble in one place
+
+The composition root creates the infrastructure, builds the modules over it, and flattens their entries into the three lists `kronos()` takes. This is the only file that references the event store and buses the process uses, so replacing an in-memory store with a database changes only these lines:
+
+```ts
+const eventStore = inMemoryEventStore()
+const commandBus = localCommandBus(unitOfWork)
+const queryBus = localQueryBus(unitOfWork)
+const infrastructure = { eventStore, tokenStore: inMemoryTokenStore(), unitOfWork, commandBus, queryBus }
+
+const modules = [catalogModule(infrastructure), rentalsModule(infrastructure)]
+
+const app = kronos({
+  commandHandlers: modules.flatMap((each) => each.commandHandlers),
+  queryHandlers: modules.flatMap((each) => each.queryHandlers),
+  eventHandlers: modules.flatMap((each) => each.eventHandlers),
+})
+```
+
+Two modules built over the same `infrastructure` share one event store and one command bus. A module given a different event store runs against a separate log, and [Assembly](/docs/kronos-ts/assembly) describes how `kronos()` groups entries.
+
+## Checking it works
+
+Add a tool, register a customer, rent the tool, wait for the inventory processor to catch up, and read the inventory. The script is `main.ts` in the same directory:
+
+```sh
+bun run main.ts
+```
+
+The output shows the rental succeeded and the tool is out:
+
+```text
+{"rented":true}
+[{"toolId":"t-1","name":"Cordless drill","available":false}]
+```
+
+## Related
+
+- [Testing](/docs/kronos-ts/testing) builds an app from a module's entries and runs scenarios against it.
+- [Test a slice](/docs/kronos-ts/guides/testing-a-slice) tests the renting slice and the inventory.
+- [Commands](/docs/kronos-ts/commands) describes command handlers and the context they receive.
+- [Assembly](/docs/kronos-ts/assembly) describes `kronos()` and its entries.

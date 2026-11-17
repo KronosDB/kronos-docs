@@ -1,0 +1,194 @@
+---
+title: Secure a server
+description: Require credentials on the client port, encrypt it with TLS or mTLS, accept identity provider tokens, and put authentication on the admin console.
+---
+
+A KronosDB server has two ports with separate security settings: the client port, which clients and cluster peers share, and the admin port, which serves the console, the JSON API and the probes. By the end of this guide both require credentials, the client port uses TLS, and each application has its own limited role. You need a running node, the certificates for TLS, and an identity provider for OpenID Connect. Every setting used here is listed in [Configuration](/docs/kronosdb/configuration).
+
+## What is open by default
+
+With nothing configured, the client port accepts every connection as an anonymous caller that may do everything, including act as a cluster peer. The server logs `authentication is DISABLED` at startup when this is the case. Traffic on the port is plaintext until a certificate and key are set.
+
+The admin port starts with authentication mode `none`, which also logs a warning. Anyone who can reach it can browse every event in every context, create contexts and change cluster membership. It binds to `127.0.0.1` by default, but the container image binds it to `0.0.0.0`, so a published admin port is open. The admin port has no TLS at all. Put a reverse proxy or a mesh in front of it when it crosses a network you do not control, especially in OIDC mode where it sets session cookies.
+
+`/health`, `/ready` and `/metrics` never require credentials, in any mode, so that probes and scrapers work. They expose counts and states, never event payloads.
+
+## Require a token on the client port
+
+Setting a shared token on the client port makes every client present a credential in its handshake. The same token is what cluster nodes use to authenticate to each other, so it carries full access.
+
+```toml
+[security]
+access-token = "replace-with-a-long-random-string"
+```
+
+Set it with `--access-token` or `KRONOSDB_ACCESS_TOKEN` instead to keep the secret out of a file. A client sends it as `token`:
+
+```ts
+export async function connectWithToken(token: string) {
+  return kronosDbConnection({
+    componentName: "toolstore-counter",
+    serializer: jsonSerializer(),
+    host: "kronosdb.internal",
+    port: 50051,
+    context: "toolstore",
+    token,
+  })
+}
+```
+
+A token that does not verify is rejected. It does not fall back to a client certificate.
+
+## Give each application its own role
+
+The shared token is for nodes and operators. An application gets a named token, or an identity from a provider, with only the role it needs. A role is one of the following, and each implies the ones before it except `peer`.
+
+| Role | Allows |
+| --- | --- |
+| `read` | Reading events and positions, snapshots and schedules, dispatching queries, opening subscription queries, connecting a platform stream. |
+| `write` | Everything in `read`, plus appending events and snapshots, scheduling, dispatching commands, and registering command and query handlers. |
+| `admin` | Everything in `write`, plus any request the server has not classified, and the admin API. |
+| `peer` | Node-to-node traffic only: Raft, segment replication, forwarded appends and the messaging fabric. Nothing implies it. |
+
+A `read`, `write` or `admin` grant can be limited to contexts and buses by name pattern, where `*` matches any run of characters. A limited grant never confers `admin` or `peer`, because both are cluster-wide.
+
+```toml
+[[security.tokens]]
+name = "toolstore-counter"
+token-file = "/run/secrets/kronosdb/toolstore-counter"
+roles = ["write"]
+contexts = ["toolstore"]
+buses = ["toolstore"]
+
+[[security.tokens]]
+name = "reporting"
+token-file = "/run/secrets/kronosdb/reporting"
+roles = ["read"]
+contexts = ["toolstore"]
+```
+
+Exactly one of `token` and `token-file` is allowed in each entry. A client that requests a context or bus outside its grant is rejected, and the rejection does not reveal whether the context exists.
+
+## Turn on TLS
+
+Set a certificate chain and a private key, both PEM, to serve TLS on the client port. The server expects the TLS handshake first on that port and has no plaintext fallback, so every client and every peer must use TLS once it is on.
+
+```toml
+[security]
+tls-cert = "/etc/kronosdb/tls/server.pem"
+tls-key = "/etc/kronosdb/tls/server-key.pem"
+```
+
+The TypeScript client turns TLS on with `ssl.enabled` and trusts the CA named by `certFile`, which is read from disk once when the connection is created.
+
+```ts
+export async function connectWithTls() {
+  return kronosDbConnection({
+    componentName: "toolstore-counter",
+    serializer: jsonSerializer(),
+    host: "kronosdb.internal",
+    port: 50051,
+    context: "toolstore",
+    ssl: {
+      enabled: true,
+      certFile: "/etc/kronosdb/ca.pem",
+      clientCertFile: "/etc/kronosdb/client.pem",
+      clientKeyFile: "/etc/kronosdb/client-key.pem",
+    },
+  })
+}
+```
+
+`clientCertFile` and `clientKeyFile` are only needed when the server requires client certificates, described next. The certificate must be valid for the host name the client connects to.
+
+## Require client certificates
+
+Setting `tls-ca` makes the server verify client certificates against that CA. By default a connection without a certificate is rejected, which is mutual TLS. The identity of a certificate is its SPIFFE ID (a URI SAN), then a DNS SAN, then the common name, and a grant with `source = "mtls"` turns that identity into roles.
+
+```toml
+[security]
+tls-cert = "/etc/kronosdb/tls/server.pem"
+tls-key = "/etc/kronosdb/tls/server-key.pem"
+tls-ca = "/etc/kronosdb/tls/ca.pem"
+
+[[security.grants]]
+source = "mtls"
+subject = "spiffe://example.com/toolstore/*"
+roles = ["write"]
+contexts = ["toolstore"]
+```
+
+A grant with `source = "mtls"` is accepted only when `tls-cert`, `tls-key` and `tls-ca` are all set, and it cannot match on `claims`. To let certificate holders and token callers share the port, set `tls-client-auth = "optional"`. The server then verifies a certificate when one is presented and does not demand it. It fails to start in that mode unless some authentication is configured.
+
+## Accept identity provider tokens
+
+The server can trust any number of OpenID Connect issuers, which covers people signing in through a company provider and workloads that carry a provider-issued token, such as Kubernetes service accounts. Declare the issuer, then a grant that lists which of its subjects receive which roles. The issuer's signing keys are fetched on first use, so an unreachable provider does not block startup.
+
+```toml
+[[security.issuers]]
+name = "cluster"
+issuer = "https://kubernetes.example.com"
+audiences = ["kronosdb"]
+
+[[security.grants]]
+source = "cluster"
+subject = "system:serviceaccount:toolstore:counter"
+roles = ["write"]
+contexts = ["toolstore"]
+```
+
+A client sends the JWT as its `token`. The server checks the signature, the issuer, the expiry and the audience when `audiences` is set. It rejects tokens signed with symmetric algorithms. Leaving `audiences` empty skips the audience check, and the server warns about such an issuer at startup, so restrict callers with grant `claims` instead. A grant's `claims` table must all match the token, and an array claim matches when it holds the value.
+
+When the provider has no public key endpoint, point the issuer at its keys with `jwks-uri` or `jwks-file`. The Kubernetes API server serves its keys only to authenticated callers, so an in-cluster issuer uses `jwks-uri`, `ca-file` and `jwks-bearer-token-file` together. Keys rotate without a restart. Certificates and static tokens are read at startup and change with a rolling restart.
+
+## Let nodes authenticate to each other
+
+Nodes call each other on the client port with the `peer` role. When any authentication is configured on a clustered node, the server fails to start unless peers can authenticate: either `access-token` is set, or a grant with `source = "mtls"` and `roles = ["peer"]` matches the nodes' certificates.
+
+With TLS on, each node presents its own `tls-cert` and `tls-key` to its peers and verifies them against `tls-ca`. The host in each `KRONOSDB_CLUSTER_PEERS` address is the name checked against the peer's certificate, so use names the certificates cover. A node with `tls-cert` but no `tls-ca` has no CA to trust for its peers and cannot connect to them. [Run a cluster](/docs/kronosdb/clustering) shows the full peer settings.
+
+## Protect the admin console
+
+The admin port has three modes, set with `[admin.auth] mode`, `--admin-auth-mode` or `KRONOSDB_ADMIN_AUTH_MODE`.
+
+In `token` mode, a browser shows a sign-in form where you enter the token, or you open a URL ending in `?access_token=<token>` once to start a session. Scripts send `Authorization: Bearer <token>`. The server fails to start in this mode without a token.
+
+```sh
+curl -H "Authorization: Bearer $KRONOSDB_ADMIN_TOKEN" http://localhost:9240/api/v1/node
+```
+
+In `oidc` mode, the console authenticates users with the authorization code flow and PKCE, and keeps a signed session cookie for `session-ttl-minutes`, 480 by default. API callers send a JWT from the same provider as a bearer token, and the server validates it against the provider's keys.
+
+```toml
+[admin.auth]
+mode = "oidc"
+
+[admin.oidc]
+issuer = "https://keycloak.example.com/realms/platform"
+client-id = "kronosdb-console"
+client-secret = "replace-me"
+redirect-url = "https://kronosdb.example.com/auth/callback"
+role-claim = "realm_access.roles"
+required-role = "kronosdb-admin"
+cookie-secret = "replace-with-a-long-random-string"
+```
+
+Register `redirect-url` at the provider. Without `required-role`, any authenticated user of the realm is an administrator. Without `cookie-secret`, the server generates a key at each start, so sessions end on restart and a session from one replica is not valid on another.
+
+In either mode, a bearer credential for the client port that resolves to a cluster-wide `admin` role is also accepted by the admin API. The `kronos` CLI relies on this to use one credential for both ports.
+
+## Checking it works
+
+Connect without a credential and the client fails its handshake. Connect with the token and it succeeds. The Settings page of the console shows the client authentication methods, and whether TLS and a CA are configured. `GET /api/v1/access` lists the configured tokens, issuers and grants by name, role and scope, and never prints a secret. On `/metrics`, `kronosdb_auth_authenticated_total{method="token"}`, `method="jwt"` and `method="mtls"` count successful handshakes, and `kronosdb_auth_rejected_total{reason="unauthenticated"}` and `reason="permission_denied"` count rejections.
+
+```sh
+curl -s http://localhost:9240/metrics | grep kronosdb_auth
+```
+
+With the `kronos` CLI installed, `kronos whoami` prints the identity the server resolved from your credential and the roles it grants.
+
+## Related
+
+- [Configuration](/docs/kronosdb/configuration): every security setting.
+- [Admin console](/docs/kronosdb/admin-console): the console and API that the admin modes protect.
+- [Run a cluster](/docs/kronosdb/clustering): peer authentication in a cluster.

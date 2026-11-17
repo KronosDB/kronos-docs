@@ -1,0 +1,26 @@
+{
+  "title": "Kronos",
+  "description": "The TypeScript framework",
+  "root": true,
+  "pages": [
+    "---What is Kronos---",
+    "index",
+    "messages",
+    "commands",
+    "state",
+    "events",
+    "event-processors",
+    "queries",
+    "scheduling",
+    "snapshots",
+    "assembly",
+    "interception-and-validation",
+    "observability",
+    "versioning",
+    "testing",
+    "infrastructure",
+    "---Using Kronos---",
+    "getting-started",
+    "guides"
+  ]
+}

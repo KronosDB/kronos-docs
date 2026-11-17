@@ -1,0 +1,134 @@
+---
+title: Scheduling
+description: How a handler schedules an event to be appended at a later time, and how each event store family keeps and fires the schedule.
+---
+
+Scheduling records an event that is to be appended to the event store at a future time. The event is an ordinary event with a name, a payload and tags. It stays out of the log until its time arrives, and then it is appended and delivered to event handlers like any other event. In the tool store, a rental is due back in seven days: the command handler that records `ToolRented` also schedules a `RentalOverdue` event for seven days later, and a handler of `RentalOverdue` reacts if the tool is still out.
+
+A schedule belongs to the event store, so a store has to be wrapped before a handler can use it. The wrapper is chosen by the store family: `inMemorySchedulingEventStore` in `@kronos-ts/core`, `postgresSchedulingEventStore` in `@kronos-ts/postgres` and `kronosDbSchedulingEventStore` in `@kronos-ts/kronosdb`. Axon Server has none. Scheduling commands is not part of this feature: schedule an event and let an event handler send the command when the event arrives. Each schedule fires once, and a recurring job needs its handler to schedule the next one.
+
+## Scheduling an event
+
+A handler schedules with `ctx.scheduleAfter(event, payload, delayMs)` for a delay from now, or `ctx.schedule(event, payload, at)` for a `Date`. Both take the event descriptor and its payload, as `ctx.append` does, and an optional metadata record as the last argument. Both return a promise of a `ScheduleToken`, which identifies the schedule for cancelling it.
+
+```ts
+export const rentTool = commandHandler(
+  RentTool,
+  async ({ payload }, ctx: CommandHandlerContext<ScheduleCapableEventStore>) => {
+    ctx.append(ToolRented, payload)
+    await ctx.scheduleAfter(RentalOverdue, payload, SEVEN_DAYS)
+  },
+)
+```
+
+A time in the past, or a negative delay, is valid and fires as soon as the store processes it. `schedule` throws an `Error` for an invalid `Date`, and `scheduleAfter` throws for a delay that is not a finite number. The event's tags are computed from its payload when it is scheduled, with the same extractors as `ctx.append`.
+
+A scheduled event carries exactly the metadata passed to `ctx.schedule`. A handler wrapped in `correlatingHandler` adds the correlation metadata of the message it is handling at the moment it schedules, as described in [Observability](/docs/kronos-ts/observability).
+
+On Postgres the schedule is written in the transaction of the command, so a command that fails schedules nothing. On the in-memory family the schedule is armed after the commit. KronosDB does not join the unit of work, as described under [KronosDB](#kronosdb).
+
+## Wrapping the event store
+
+A handler can call `ctx.schedule`, `ctx.scheduleAfter` and `ctx.cancelSchedule` when the event store of its entry was wrapped by a scheduling wrapper. The handler declares this in its context type, as `CommandHandlerContext<ScheduleCapableEventStore>` does above, or as `EventHandlerContext & ScheduleCapability` for an event handler. Wrap the store once, where the application is assembled, and pass the same wrapped store to every entry and processor that needs it. Wrappers combine with the other store wrappers in any order.
+
+```ts
+const eventStore = inMemorySchedulingEventStore(inMemoryEventStore(), {
+  clock: () => Date.now() + SEVEN_DAYS,
+})
+```
+
+An entry that supplies a bare store to a handler that demands scheduling does not typecheck. A JavaScript caller that reaches `ctx.scheduleAfter` with a bare store gets an `Error` reporting that the entry's `eventStore` was never wrapped. Query handlers have no scheduling members. Event handlers cannot append, so scheduling is how an event handler creates a future event in response to an event.
+
+## What happens when the time comes
+
+When the time is reached, the store appends the event to the log. The append has no condition, so it cannot fail on a conflict, and no command handler runs. Processors then read the event in log order, and the handlers of `RentalOverdue` receive it. The event is appended at or after its fire time, depending on when the store's timer or worker next runs.
+
+```ts
+export const noteOverdue = eventHandler(RentalOverdue, ({ payload, timestamp }) => {
+  console.log(`overdue: ${payload.toolId} with ${payload.customerId}, scheduled at ${timestamp}`)
+})
+```
+
+A schedule does not check that the circumstances still hold. If the customer returned the tool on day three, `RentalOverdue` is appended on day seven anyway. The handler of the event loads the state it needs and ignores the event when it does not apply, as the `RentalOverdue` handler that sends `SuspendCustomer` does in [Events](/docs/kronos-ts/events). When a schedule belongs to one rental and removing it is cheap, cancel it instead.
+
+### Cancelling
+
+`ctx.cancelSchedule(token)` cancels a schedule that has not fired. Kronos does not store tokens: keep the token where the cancelling code can read it, usually in a table or in an event that carries it. The example keeps tokens in a map, which stands in for that table.
+
+```ts
+export const returnTool = commandHandler(
+  ReturnTool,
+  async ({ payload }, ctx: CommandHandlerContext<ScheduleCapableEventStore>) => {
+    ctx.append(ToolReturned, payload)
+    const token = deadlines.get(payload.toolId)
+    if (token === undefined) return
+    const outcome = await ctx.cancelSchedule(token)
+    if (outcome.kind === "already-appended") console.log("the deadline already fired")
+    if (outcome.kind === "cancelled") deadlines.delete(payload.toolId)
+  },
+)
+```
+
+The result has three outcomes. `cancelled` means the schedule was pending and its event will not be appended. `already-appended` means the event fired first and is in the log, so a handler that has to compensate does it now. `not-found` means no schedule matches the token: it was cancelled before, it never existed, or it belongs to another deployment.
+
+### Restart
+
+A schedule outlives the process on the families that store it.
+
+- In memory, a restart loses every pending schedule, so this family is for tests and local runs.
+- On Postgres, a pending schedule is a row. After a restart, the worker fires the rows that are due, oldest first, as soon as the host starts it, so a deadline that passed while the process was down fires in the first tick.
+- On KronosDB, the server holds the schedule. Due schedules fire when the server is up, whether or not any application instance is running.
+
+## Families
+
+### In memory
+
+`inMemorySchedulingEventStore(store, options?)` fires each schedule from a timer in the process. A pending timer does not keep the process from exiting, so a script that schedules and then ends does not wait for the deadline. A cancel in a unit of work that later rolls back leaves the schedule cancelled, so the event does not fire; test cancel and roll back against Postgres.
+
+The `clock` option returns the current time in milliseconds, and the example above passes a clock a week ahead so the deadline is due at once. A test calls `stopScheduling()` when it finishes so that no schedule fires into the next one.
+
+### Postgres
+
+`postgresSchedulingEventStore(store, pg, unitOfWork)` stores each schedule in a table and runs a polling worker that appends the rows that are due. The `unitOfWork` must be `postgresUnitOfWork(unitOfWork, pg)`, because the append and the status change must be in one transaction, and `ctx.schedule` throws an `Error` without a Postgres transaction. The table is created as described in [Postgres](/docs/kronos-ts/infrastructure/postgres).
+
+```ts
+const postgresStore = postgresSchedulingEventStore(postgresEventStore(pg), pg, uow)
+
+// The worker is started by the host. `polling` and `batched` tune it.
+const worker = polling(batched(postgresStore, 100), 250)
+await worker.startScheduling()
+await worker.stopScheduling()
+```
+
+`kronos()` does not start the worker. The host calls `startScheduling()` after assembly and `stopScheduling()` before it closes the pool. The worker polls every 1000 ms and fires at most 50 rows per tick, and `polling` and `batched` change those numbers. Several instances can run a worker at once, and each takes different rows. A failed tick is logged with `console.warn` and tried again at the next tick. If the process stops mid-tick, the rows are picked up again, so delivery is at least once.
+
+### KronosDB
+
+`kronosDbSchedulingEventStore(store, kdb, context?)` sends each schedule to the KronosDB server, which appends the event when it is due. A schedule is durable once `schedule` resolves, and a due schedule fires exactly once across a leader failover.
+
+The unit of work passed to `ctx.schedule` and `ctx.cancelSchedule` is ignored, so a handler that schedules and then throws has still scheduled, and a cancel in a failed unit of work stays cancelled. A follower node rejects scheduling and cancelling with `unavailable`, which the caller retries.
+
+```ts
+const kronosDbStore = kronosDbSchedulingEventStore(kronosDbEventStore(kdb, "toolstore"), kdb)
+
+const pending = await kronosDbStore.listSchedules()
+```
+
+`listSchedules()` returns the schedules that have not fired or been cancelled, soonest first. `scheduleIdempotent(event, at, token)` schedules under a token you choose, and a second call with the same token throws `ScheduleAlreadyExistsError`. `ctx.schedule` cannot take a token, so a retry of a command that scheduled arms the schedule twice unless the handler calls `scheduleIdempotent` on the store directly.
+
+## Errors
+
+- A context without scheduling members is a compile error. A JavaScript caller gets an `Error` reporting that the entry's `eventStore` was never wrapped.
+- `schedule` with an invalid `Date`, or `scheduleAfter` with `NaN` or an infinite delay, throws an `Error` that names the argument.
+- `ctx.schedule` called after the handler's unit of work has closed throws `NoActiveUnitOfWork`.
+- On Postgres, `schedule` without a Postgres transaction throws an `Error`.
+- On KronosDB, a follower node rejects scheduling and cancelling with an error of the kind `unavailable`. `scheduleIdempotent` with a token that is in use throws `ScheduleAlreadyExistsError`.
+- A cancel that finds nothing returns `not-found`. A cancel that arrives after the event fired returns `already-appended`. Neither throws.
+
+## Related
+
+- [Events](/docs/kronos-ts/events) covers the handlers that receive a scheduled event.
+- [Commands](/docs/kronos-ts/commands) covers the command handlers that arm a deadline.
+- [Postgres](/docs/kronos-ts/infrastructure/postgres) and [KronosDB](/docs/kronos-ts/infrastructure/kronosdb) cover the stores these wrappers go on.
+- [Testing](/docs/kronos-ts/testing) covers scheduled events in given/when/then scenarios.
+- [Observability](/docs/kronos-ts/observability) covers correlation metadata on scheduled events.

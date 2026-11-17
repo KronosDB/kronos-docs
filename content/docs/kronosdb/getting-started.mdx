@@ -1,0 +1,107 @@
+---
+title: Run KronosDB
+description: Start a single KronosDB node, check that it is ready, declare a context and connect a client.
+---
+
+This guide starts one KronosDB node in Docker, checks that it is healthy, declares the `toolstore` context and connects a TypeScript client to it. You need Docker, or a Rust toolchain if you build the binary yourself. Running more than one node is covered in [Run a cluster](/docs/kronosdb/clustering).
+
+## Start the node
+
+The server is published as a multi-architecture image (linux/amd64 and linux/arm64) at `ghcr.io/kronosdb/kronosdb`. Each release is tagged with its version, and `latest` is the newest one. The command below publishes the client port and the admin port and keeps the data in a named volume.
+
+```sh
+docker run -d --name kronosdb \
+  -p 50051:50051 -p 9240:9240 \
+  -v kronosdb-data:/data \
+  -e KRONOSDB_DEV=1 \
+  ghcr.io/kronosdb/kronosdb:latest
+```
+
+The image runs `kronosdb-server` as the unprivileged user `kronosdb` and listens on `0.0.0.0:50051` for clients and peers and on `0.0.0.0:9240` for the admin console, probes and metrics. Everything it stores is under `/data`, which is declared as a volume. Pin a version tag such as `ghcr.io/kronosdb/kronosdb:0.11.0` for anything you keep.
+
+`KRONOSDB_DEV=1` turns on dev mode. At startup the server checks the data disk and its environment and normally logs problems such as a slow fsync or an in-memory filesystem as warnings. Dev mode logs them at info level, so a laptop does not fill the log with warnings, and it should be off on a production server.
+
+### Without Docker
+
+The releases publish the image and a chart, not prebuilt binaries. To run a binary, build it from the repository with a Rust toolchain.
+
+```sh
+git clone https://github.com/KronosDB/kronosdb.git
+cd kronosdb
+cargo build --release --package kronosdb-server
+KRONOSDB_DEV=1 ./target/release/kronosdb-server --data-dir ./data
+```
+
+Outside the image the server listens on `127.0.0.1:50051` and `127.0.0.1:9240` unless you set `--listen` and `--admin-listen`, and it keeps its data in `./data`. The [configuration reference](/docs/kronosdb/configuration) lists every flag, environment variable and config file key.
+
+## Check health and readiness
+
+The admin port serves two probes that need no credentials. `/health` returns `ok` while the process is up. `/ready` returns `ready` with status 200 once the node can accept writes, and status 503 until then.
+
+```sh
+curl -i http://localhost:9240/health
+curl -i http://localhost:9240/ready
+```
+
+A single node elects itself and is ready within a moment of starting. The first start of a large data directory takes longer, because the node recovers its segments before it reports ready. If `/ready` keeps returning 503, read the container log with `docker logs kronosdb`.
+
+## Open the console
+
+Open `http://localhost:9240` in a browser. It redirects to the Overview page, which shows uptime, the number of contexts, the total event count and the connected clients. The admin console has no authentication by default and the server logs a warning that authentication is disabled; [Secure a server](/docs/kronosdb/security) covers turning it on, and the [console reference](/docs/kronosdb/admin-console) describes each screen.
+
+## Declare a context
+
+A **context** is one independent event store inside the server, with its own log and its own positions. The server creates a context named `default` on first start. The tool store in these docs uses a context named `toolstore`, which you declare in one of three ways.
+
+The first is the Contexts page of the console, which has a field for the name and a Create button. The second is the admin API, described with the other ways in [Contexts](/docs/kronosdb/contexts):
+
+```sh
+curl -X POST http://localhost:9240/api/contexts \
+  -H 'Content-Type: application/json' \
+  -d '{"name": "toolstore"}'
+```
+
+The third is a manifest file, which is the way to keep contexts in version control. The server creates the contexts it declares that are missing, and never deletes one.
+
+```toml
+# kronosdb-manifest.toml
+[[contexts]]
+name = "toolstore"
+```
+
+Point the server at the file with `--manifest` or `KRONOSDB_MANIFEST`. A file named `kronosdb-manifest.toml` in the server's working directory is used without any setting.
+
+## Connect a client
+
+A client needs the host, the port and the context. The TypeScript client opens one connection, and the event store and buses built on it address contexts by name. The [Kronos guide for KronosDB](/docs/kronos-ts/guides/running-on-kronosdb) wires a whole application; the excerpt below only checks the connection.
+
+```ts
+export async function checkConnection() {
+  const kdb = await kronosDbConnection({
+    componentName: "toolstore-counter",
+    serializer: jsonSerializer(),
+    host: "localhost",
+    port: 50051,
+    context: "toolstore",
+  })
+
+  const firstPosition = await kronosDbTail(kdb, "toolstore")
+  await kdb.close()
+  return firstPosition
+}
+```
+
+`kronosDbTail` returns the first position the context still stores, so it succeeds only when the connection and the context both work.
+
+## Checking it works
+
+`curl http://localhost:9240/ready` prints `ready`. The Contexts page lists `default` and `toolstore`. `docker logs kronosdb` shows a line `KronosDB starting` with the listen address, the data directory, the version and the contexts, followed by `listening`. Connecting a client adds a row to the Clients page.
+
+To stop the node, run `docker stop kronosdb`. On SIGTERM the server instructs clients to reconnect to another node, shuts down cleanly and exits within the drain deadline, 20 seconds by default. Docker waits 10 seconds before it kills a container, so add `--time 30` when you stop one that has many connected clients.
+
+## Related
+
+- [Configuration](/docs/kronosdb/configuration): every setting.
+- [Secure a server](/docs/kronosdb/security): client tokens, TLS and console authentication.
+- [Run a cluster](/docs/kronosdb/clustering): three nodes with Docker Compose or Helm.
+- [Contexts](/docs/kronosdb/contexts): what a context is and how it is stored.

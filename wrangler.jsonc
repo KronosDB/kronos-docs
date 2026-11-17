@@ -1,0 +1,10 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "kronos-docs",
+  "compatibility_date": "2026-11-01",
+  "routes": [{ "pattern": "kronosdb.com", "custom_domain": true }],
+  "assets": {
+    "directory": "./out",
+    "not_found_handling": "404-page"
+  }
+}

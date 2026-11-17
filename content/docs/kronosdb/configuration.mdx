@@ -1,0 +1,187 @@
+---
+title: Configuration
+description: The KronosDB server settings an operator sets, with their config file key, command-line flag, environment variable and default.
+---
+
+The `kronosdb-server` binary reads its settings from command-line flags, environment variables and an optional TOML file. This page lists the settings, grouped by area. The container image runs the binary as its entrypoint, so anything after the image name in `docker run` is a flag, and `-e` sets an environment variable.
+
+## Sources and precedence
+
+A setting resolves from the first source that provides it, in this order: command-line flag, environment variable, config file, default. A flag and its environment variable are the same setting, so `--listen 0.0.0.0:50051` and `KRONOSDB_LISTEN=0.0.0.0:50051` are equivalent.
+
+The config file is TOML. `--config` (short form `-c`, environment variable `KRONOSDB_CONFIG`) names it. Without that setting the server reads `kronosdb.toml` in its working directory when the file exists. A file that cannot be parsed stops the server at startup. Unrecognized keys are ignored outside the `[[security.tokens]]`, `[[security.issuers]]` and `[[security.grants]]` entries, so a misspelled key leaves the default in place.
+
+```toml
+# kronosdb.toml
+listen = "0.0.0.0:50051"
+data-dir = "/data"
+node-name = "kronosdb-0"
+
+[storage]
+ack-mode = "auto"
+
+[admin]
+listen = "0.0.0.0:9240"
+
+[admin.auth]
+mode = "token"
+token = "change-me"
+```
+
+`none` in a table means the setting has no form in that source. Sizes are bytes and durations are whole seconds unless the Meaning column gives another unit.
+
+## Server
+
+| Config file key | Flag | Environment variable | Default | Meaning |
+| --- | --- | --- | --- | --- |
+| none | `--config`, `-c` | `KRONOSDB_CONFIG` | `kronosdb.toml` if present | Path of the config file. |
+| `data-dir` | `--data-dir` | `KRONOSDB_DATA_DIR` | `data` (`/data` in the image) | Directory that holds every context. The server takes an exclusive lock on `<data-dir>/LOCK` and does not start when another process holds it. |
+| `node-name` | `--node-name` | `KRONOSDB_NODE_NAME` | `kronosdb-0` | Name this node reports to clients and in the console. |
+| `manifest` | `--manifest` | `KRONOSDB_MANIFEST` | `kronosdb-manifest.toml` in the working directory, if present | Path of the [manifest](/docs/kronosdb/contexts#the-manifest) that declares contexts. |
+| `dev` | `--dev` | `KRONOSDB_DEV` | `false` | Logs the startup hardware findings at info instead of warn or error. Accepts `true`, `false`, `1`, `0`, `yes`, `no`, `on`, `off`; an empty value means off. Never set it on a production node. |
+| none | `--drain-deadline-secs` | `KRONOSDB_DRAIN_DEADLINE` | `20` | Seconds the server waits for open connections to close after SIGTERM before it exits. |
+
+## Network
+
+| Config file key | Flag | Environment variable | Default | Meaning |
+| --- | --- | --- | --- | --- |
+| `listen` | `--listen` | `KRONOSDB_LISTEN` | `127.0.0.1:50051` (`0.0.0.0:50051` in the image) | Address of the client and peer port. Clients, other nodes and the `kronos` CLI all connect here. |
+| `[admin] listen` | `--admin-listen` | `KRONOSDB_ADMIN_LISTEN` | `127.0.0.1:9240` (`0.0.0.0:9240` in the image) | Address of the admin HTTP port: console, JSON API, `/health`, `/ready` and `/metrics`. It has no TLS of its own. |
+
+TLS for the client port is configured under [Auth](#auth). A single request is limited to 16 MiB, and the server has no setting for it.
+
+## Storage
+
+| Config file key | Flag | Environment variable | Default | Meaning |
+| --- | --- | --- | --- | --- |
+| `[storage] segment-size` | `--segment-size` | `KRONOSDB_SEGMENT_SIZE` | `268435456` (256 MiB) | Size at which a context rolls to a new segment file. |
+| `[storage] index-cache-bytes` | `--index-cache-bytes` | `KRONOSDB_INDEX_CACHE_BYTES` | `1073741824` (1 GiB) | Heap budget for cached segment indexes. |
+| `[storage] bloom-cache-bytes` | `--bloom-cache-bytes` | `KRONOSDB_BLOOM_CACHE_BYTES` | `134217728` (128 MiB) | Heap budget for cached bloom filters. |
+| `[storage] max-snapshot-size` | `--max-snapshot-size` | `KRONOSDB_MAX_SNAPSHOT_SIZE` | `4194304` (4 MiB) | Largest snapshot state a client may store. Snapshot records share the log with events, and a larger blob is rejected. |
+
+The index and bloom budgets together should stay well under half of the memory the node has, because reads use the operating system's page cache. The startup hardware check reports a `low_memory` finding when they exceed half.
+
+## Durability
+
+| Config file key | Flag | Environment variable | Default | Meaning |
+| --- | --- | --- | --- | --- |
+| `[storage] ack-mode` | `--ack-mode` | `KRONOSDB_ACK_MODE` | `auto` | When an append is acknowledged. `durable` waits until a quorum has fsynced. `written` waits until a quorum has written the events, and the fsync trails by one group-commit wave. `auto` is `durable` on a single voter, and on two or more voters is `durable` when the startup disk probe measures an fdatasync p99 under 1 ms and `written` otherwise. An empty environment variable counts as unset. |
+| none | `--group-commit-ms` | `KRONOSDB_GROUP_COMMIT_MS` | `0` | Extra milliseconds the writer waits to batch commits. At `0` it fsyncs as soon as writes are pending, and concurrent writes batch while the fsync runs. A positive value adds that much latency for larger batches. |
+| none | none | `KRONOSDB_ACK_LAG_LIMIT` | `65536` | Under `written` acknowledgements, how many events may be acknowledged ahead of the locally fsynced position. Past it, appends wait for the fsync as in `durable` mode. |
+
+## Cluster
+
+[Run a cluster](/docs/kronosdb/clustering) describes how these fit together. They are set with flags or environment variables, and have no config file key.
+
+| Config file key | Flag | Environment variable | Default | Meaning |
+| --- | --- | --- | --- | --- |
+| none | `--cluster-node-id` | `KRONOSDB_CLUSTER_NODE_ID` | unset (treated as `1`) | Numeric id of this node. It must be unique in the cluster and stay the same across restarts. |
+| none | `--cluster-peers` | `KRONOSDB_CLUSTER_PEERS` | empty | Comma-separated `id=address` entries for every voter, this node included, for example `1=node1:50051,2=node2:50051,3=node3:50051`. Empty means a single-node cluster. Use stable host names, because the addresses are stored in the cluster's membership. |
+| none | `--cluster-learners` | `KRONOSDB_CLUSTER_LEARNERS` | empty | Comma-separated `id=address` entries for passive-backup learners the node adds to the membership at startup. |
+| none | `--cluster-node-type` | `KRONOSDB_CLUSTER_NODE_TYPE` | `standard` | `standard` for a voter, or `passive-backup` for a learner that replicates everything and never votes. |
+
+## Auth
+
+These settings protect the client and peer port. [Secure a server](/docs/kronosdb/security) explains how they combine. Nothing here is set by default, and the port is open until at least one credential is configured.
+
+| Config file key | Flag | Environment variable | Default | Meaning |
+| --- | --- | --- | --- | --- |
+| `[security] access-token` | `--access-token` | `KRONOSDB_ACCESS_TOKEN` | unset | Shared secret that grants full access, including the `peer` role. Setting it makes every client present a credential. Nodes use it to authenticate to each other. |
+| `[security] tls-cert` | `--tls-cert` | `KRONOSDB_TLS_CERT` | unset | Server certificate chain, PEM. Also the identity this node presents to its peers. |
+| `[security] tls-key` | `--tls-key` | `KRONOSDB_TLS_KEY` | unset | Private key of the certificate, PEM. Both `tls-cert` and `tls-key` are needed for TLS. |
+| `[security] tls-ca` | `--tls-ca` | `KRONOSDB_TLS_CA` | unset | CA certificate, PEM. Client certificates are verified against it, and a node uses it to verify its peers. |
+| `[security] tls-client-auth` | `--tls-client-auth` | `KRONOSDB_TLS_CLIENT_AUTH` | `required` | With `tls-ca` set, `required` rejects connections that present no certificate. `optional` verifies a certificate when one is presented and lets token callers connect without one. `optional` fails to start unless some authentication is configured. |
+
+The three list tables below have no flag or environment form and are read from the config file only.
+
+`[[security.tokens]]` declares a named static token.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `name` | required | Name shown in the access summary and logs. |
+| `token` | unset | The secret. Exactly one of `token` and `token-file` is required. |
+| `token-file` | unset | File that holds the secret, such as a mounted Kubernetes secret. |
+| `roles` | required | One or more of `read`, `write`, `admin`, `peer`. |
+| `contexts` | all | Context name patterns the token is limited to. `*` matches any run of characters. |
+| `buses` | all | Bus name patterns the token is limited to. |
+
+`[[security.issuers]]` declares an OpenID Connect issuer whose JWTs the server trusts.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `name` | required | Name that a grant's `source` uses. `mtls` is reserved. |
+| `issuer` | required | Must equal the token's `iss` claim exactly. |
+| `audiences` | empty | Accepted `aud` values. Empty means the audience is not checked. |
+| `jwks-uri` | discovered | Fetch the signing keys from this URL instead of using OIDC discovery. Not combinable with `jwks-file`. |
+| `jwks-file` | unset | Read the signing keys from a local file, re-read on the normal refresh interval. |
+| `ca-file` | unset | Extra root CA, PEM, for the discovery and key fetch. |
+| `jwks-bearer-token-file` | unset | File with a bearer token sent when fetching the keys. |
+| `subject-claim` | `sub` | Claim that names the caller. |
+| `role-claim` | unset | Dotted path to a roles claim, such as `realm_access.roles`. |
+| `role-map` | empty | Table that maps an identity provider role name to a KronosDB role. Roles granted this way apply to every context and bus. |
+
+`[[security.grants]]` binds callers from one source to roles.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `source` | required | An issuer `name`, or `mtls` for client certificates. |
+| `subject` | `*` | Pattern over the caller's subject. For `mtls` the server tries each URI SAN, then each DNS SAN, then the CN. |
+| `claims` | empty | Claims a JWT must carry, as a table. A scalar must be equal, and an array claim matches when it contains the value. Not allowed for `mtls`. |
+| `roles` | required | Roles the grant confers. |
+| `contexts` | all | Context name patterns. A grant limited to contexts never confers `admin` or `peer`. |
+| `buses` | all | Bus name patterns. |
+
+## Admin
+
+The admin port is configured separately from the client port. The default mode is `none`.
+
+| Config file key | Flag | Environment variable | Default | Meaning |
+| --- | --- | --- | --- | --- |
+| `[admin.auth] mode` | `--admin-auth-mode` | `KRONOSDB_ADMIN_AUTH_MODE` | `none` | `none`, `token` or `oidc`. |
+| `[admin.auth] token` | `--admin-token` | `KRONOSDB_ADMIN_TOKEN` | unset | Static bearer token. Required when the mode is `token`. |
+| `[admin.oidc] issuer` | `--oidc-issuer` | `KRONOSDB_OIDC_ISSUER` | unset | Issuer URL of the identity provider. Required when the mode is `oidc`. |
+| `[admin.oidc] client-id` | `--oidc-client-id` | `KRONOSDB_OIDC_CLIENT_ID` | unset | OAuth client id. Required when the mode is `oidc`. |
+| `[admin.oidc] client-secret` | `--oidc-client-secret` | `KRONOSDB_OIDC_CLIENT_SECRET` | unset | OAuth client secret. Omit it for a public client; PKCE is always used. |
+| `[admin.oidc] redirect-url` | `--oidc-redirect-url` | `KRONOSDB_OIDC_REDIRECT_URL` | derived from the request | Callback URL registered at the provider, ending in `/auth/callback`. When unset the server builds it from the `Host` and `X-Forwarded-Proto` headers. |
+| `[admin.oidc] scopes` | none | none | `["openid", "profile", "email"]` | Scopes requested at login. |
+| `[admin.oidc] role-claim` | `--oidc-role-claim` | `KRONOSDB_OIDC_ROLE_CLAIM` | unset | Dotted path to the roles claim, such as `realm_access.roles`. |
+| `[admin.oidc] required-role` | `--oidc-required-role` | `KRONOSDB_OIDC_REQUIRED_ROLE` | unset | Role a user must have. Unset lets any authenticated user of the realm in. |
+| `[admin.oidc] audience` | `--oidc-audience` | `KRONOSDB_OIDC_AUDIENCE` | unset | Expected `aud` of bearer tokens. Unset means it is not checked. |
+| `[admin.oidc] cookie-secret` | `--oidc-cookie-secret` | `KRONOSDB_OIDC_COOKIE_SECRET` | random per start | Key that signs session cookies. Set it so sessions survive restarts and work across replicas. |
+| `[admin.oidc] session-ttl-minutes` | none | none | `480` | Lifetime of a console session. |
+
+## Backup
+
+| Config file key | Flag | Environment variable | Default | Meaning |
+| --- | --- | --- | --- | --- |
+| `[backup] url` | `--backup-url` | `KRONOSDB_BACKUP_URL` | unset | Object store that receives sealed segments, such as `s3://bucket/prefix` or `file:///backups/kronosdb`. Unset turns the upload off. Cloud credentials come from the standard environment variables of the provider. |
+| `[backup] interval-secs` | `--backup-interval-secs` | `KRONOSDB_BACKUP_INTERVAL_SECS` | `30` | Seconds between upload passes on the leader. |
+
+What the upload does and does not give you is described in [Back up and restore](/docs/kronosdb/backups).
+
+## Limits and timeouts
+
+| Config file key | Flag | Environment variable | Default | Meaning |
+| --- | --- | --- | --- | --- |
+| `[timeouts] command` | `--command-timeout` | `KRONOSDB_COMMAND_TIMEOUT` | `30` | Seconds a dispatched command may take. The server also cancels an in-flight command that has not completed after twice this value. |
+| `[timeouts] query` | `--query-timeout` | `KRONOSDB_QUERY_TIMEOUT` | `30` | Seconds a dispatched query may take. |
+| `[timeouts] heartbeat-interval` | `--heartbeat-interval` | `KRONOSDB_HEARTBEAT_INTERVAL` | `5` | Seconds between the heartbeats the server sends on each client's platform stream. |
+| `[timeouts] heartbeat-timeout` | `--heartbeat-timeout` | `KRONOSDB_HEARTBEAT_TIMEOUT` | `15` | Seconds without a heartbeat after which a client is dropped from its buses and the routing table. |
+| `[messaging] permit-wait` | none | none | `true` | When a command handler has no flow-control permits left, wait for one, bounded by the command timeout. `false` fails the command at once. |
+
+`max-snapshot-size` is the other limit; it appears under Storage.
+
+## Logging
+
+Logging is configured through the environment only.
+
+| Environment variable | Default | Meaning |
+| --- | --- | --- |
+| `RUST_LOG` | `kronosdb=info,warn` | Log filter in the `tracing` format: a level, or a comma-separated list of `target=level`. The default logs KronosDB at info and everything else at warn. |
+| `KRONOSDB_LOG_FORMAT` | text | `json` writes one JSON object per line. Any other value keeps the text format. |
+
+## Related
+
+- [Run KronosDB](/docs/kronosdb/getting-started): start a node.
+- [Secure a server](/docs/kronosdb/security): how the auth settings combine.
+- [Monitor a server](/docs/kronosdb/monitoring): logs, probes and metrics.
