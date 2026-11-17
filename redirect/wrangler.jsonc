@@ -1,0 +1,7 @@
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "kronosdb-www-redirect",
+  "main": "worker.js",
+  "compatibility_date": "2026-11-01",
+  "routes": [{ "pattern": "www.kronosdb.com", "custom_domain": true }]
+}

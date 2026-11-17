@@ -1,12 +1,15 @@
 name: Docs
 
 # Every push to main checks the docs against kronos-ts main and deploys them
-# to Cloudflare. Pull requests run the same checks without deploying.
+# to Cloudflare. Pull requests run the same checks without deploying. The
+# nightly run catches a kronos-ts change that broke a docs example.
 on:
   push:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * *"
 
 concurrency:
   group: docs-${{ github.ref }}
@@ -62,3 +65,12 @@ jobs:
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: kronos-docs
           command: deploy
+
+      - name: Deploy www redirect
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: kronos-docs
+          command: deploy -c redirect/wrangler.jsonc
