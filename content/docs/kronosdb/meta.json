@@ -9,6 +9,7 @@
     "contexts",
     "messaging",
     "replication",
+    "performance",
     "---Running KronosDB---",
     "getting-started",
     "configuration",
@@ -21,7 +22,6 @@
     "segments",
     "durability",
     "indexes",
-    "reads",
-    "performance"
+    "reads"
   ]
 }
