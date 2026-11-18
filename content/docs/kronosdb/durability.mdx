@@ -15,7 +15,12 @@ An append is acknowledged when the watermark passes its last event, and reads re
 
 In a cluster, the watermark is the position that a majority of the voters have reached, so an acknowledgement waits for that majority. Whether "reached" means written or synced is the `ack-mode` setting, described in [Configuration](/docs/kronosdb/configuration) and [Clustering and replication](/docs/kronosdb/replication).
 
-## When a sync fails
+## Disks that confirm writes early
+
+When `fdatasync` returns, the disk has reported that the data is stored. Some disks report this while the data is still in a volatile write cache: drives without power-loss protection that have their write cache enabled, and some virtual and network disks. On such a disk, events acknowledged shortly before a power failure can be lost, and no software on that node can detect it. KronosDB uses the strongest sync each platform offers, `fdatasync` on Linux and `F_FULLFSYNC` on macOS, where a plain `fsync` does not empty the drive's cache, but no sync call makes a disk store what it has only confirmed. For data that must survive a power failure, use disks with power-loss protection, and check the [hardware findings](/docs/kronosdb/monitoring#check-the-hardware-findings) the server reports at startup.
+
+Replication is what protects acknowledged events from a single disk like this. In a cluster, an append is acknowledged only after a majority of voters have it, so one node that loses its last writes in a power failure loses no acknowledged event. When that node starts, it cuts off any incomplete record at the end of its log, and when it rejoins, the leader sends it the events it is missing. Replication does not help when a majority of voters lose power at the same moment, so place voters where they do not share a power supply, a rack or a zone. A single node depends on its own disk alone.
+
 
 If a commit wave cannot be made durable, for example because `fdatasync` fails or the commit thread stops, the server cannot make the written events durable, so it stops accepting appends. Pending and later appends fail with `internal` and a message that the event store is poisoned, and the node accepts appends again after a restart.
 
