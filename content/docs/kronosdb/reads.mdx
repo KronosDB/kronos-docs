@@ -1,0 +1,25 @@
+---
+title: Reads and conditions
+description: "How KronosDB answers a query and checks an append condition using its indexes."
+---
+
+A query and an append condition both select events by type and tag. This page describes how the server resolves each one through its indexes and reads only the records it needs.
+
+## Queries
+
+A query is a list of criteria, each naming event types, tags or both. For each criterion, the server looks up the position set of every tag and intersects them, looks up the sets of the named types and intersects their union with the tag result, and then takes the union over the criteria. It does this per range of the log: merged tables for the oldest segments, segment key tables after them, and the in-memory index for the active segment. A key that is missing from a table's directory rules out that whole range without reading any position set.
+
+<QueryAnimation />
+
+Each matching position is then turned into a byte offset by its segment's locator, and the record is read from the segment file, which the server maps into memory. A record whose checksum does not match fails the read with an error instead of being returned.
+
+The server sends the records to the client in `Events` messages of up to 1024 events or 1 MiB each. The last message carries the head position at the time of the request, the consistency marker that the client passes in the condition of its next append.
+
+## Append conditions
+
+An append condition requires that no event matching its criteria exists at or after the marker. The server checks this with the same indexes, without reading any event: the key tables for the sealed part of that range and the in-memory index for the active segment. When a matching event exists, nothing is written and the client receives its position. If that event is not yet committed, the rejection waits until it is, so a client is never refused because of an event that could still be lost.
+
+## Related
+
+- [Indexes](/docs/kronosdb/indexes) describes the indexes these lookups use.
+- [Events and tags](/docs/kronosdb/events-and-tags) describes queries and conditional appends from a client's side.

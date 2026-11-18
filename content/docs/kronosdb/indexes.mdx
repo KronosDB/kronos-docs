@@ -1,0 +1,36 @@
+---
+title: Indexes
+description: "How KronosDB indexes events by type and tag, the index files beside each sealed segment, and how key tables are merged."
+---
+
+KronosDB finds events by type and tag through indexes, without reading the events themselves. This page describes what is indexed, where the indexes are kept, and how they stay small to search as the log grows.
+
+## What is indexed
+
+Every event is indexed under one key for its type and one key for each of its tags, so `ToolRented` with the tags `toolId=t-1` and `customerId=ada` is indexed under three keys. For each key, the index holds the set of positions of the events that have it, stored as compressed bitmaps.
+
+<IndexingAnimation />
+
+The active segment's index is kept in memory, together with the byte offset of each event in the file. It is updated as each record is written and is not saved to disk. When the server starts, it rebuilds the active segment's index by reading the segment.
+
+When a segment is sealed, a background thread writes two files beside it after the next commit:
+
+| File | Holds |
+| --- | --- |
+| `.keys` | The key table: every key in the segment with the set of positions that have it, and a directory of the keys sorted by hash, so a lookup finds a key, or finds that it is absent, in a few probes. |
+| `.idx` | The locator: the byte offset of every event in the segment. |
+
+Both files are written under a temporary name, synced, and then moved to their final name. Every section carries CRC32C checks, verified the first time it is read. Until the files exist, readers use the sealed segment's in-memory index.
+
+## Merging key tables
+
+A long log has many segments, and a query that consulted every segment's key table would open thousands of files. In the background, the server merges the key tables of eight consecutive segments into one table, then eight of those tables into one, and so on. A query over a long log reads a few large tables.
+
+<MergeAnimation />
+
+Only segments whose events are all committed are merged: sealed, with their key table on disk, and below the watermark. A merge writes the new table, then rewrites a manifest in the `index` directory that names the tables in use. The new table is in use from the moment the manifest names it. Queries that started earlier finish on the tables they opened, and the old key tables are then deleted. If the server stops during a merge, it uses the tables the manifest names and removes the rest. Segment files and locators are not changed by a merge.
+
+## Related
+
+- [Reads and conditions](/docs/kronosdb/reads) describes how queries and append conditions use these indexes.
+- [Segments and records](/docs/kronosdb/segments) describes the segment files the indexes point into.

@@ -1,0 +1,32 @@
+---
+title: Segments and records
+description: "How KronosDB lays out a context's log on disk: segment files, the records in them, and archived segments."
+---
+
+A context's log is stored as a sequence of segment files, and each event in them is one record. This page describes those files and what a record holds. Nothing here is needed to use KronosDB; it explains what the files in a data directory are.
+
+## Segments
+
+Each [context](/docs/kronosdb/contexts) stores its events in a log, and the log is a sequence of segment files. New events are always written to the end of the newest file, the active segment. When the next event does not fit, the server starts a new segment and seals the old one, which is never written to again.
+
+<SegmentsAnimation />
+
+A segment is 256 MiB by default (`segment-size`). Its file is named after its base position, the position of its first event, so `00000000000000000000.seg` holds the events from position 0 and the next file name gives the position where the first segment ends. The server allocates the active file at full size when it creates it, and trims it to the length of its data when it is sealed.
+
+## Records
+
+Each event is stored as one record. A record has a 9-byte header, which holds a CRC32C checksum, the record's length and a flags byte, followed by the event: its position, identifier, type, version, timestamp, metadata, tags and payload. The checksum covers the flags and the event, and every read checks it.
+
+Tags are stored in the record with the rest of the event. Every [index](/docs/kronosdb/indexes) is built from the records, so a lost or damaged index file is rebuilt from the segment it belongs to.
+
+A client sends events in the same layout they have on disk. The server writes the event's position into the record and computes its checksum, and does not encode the event again.
+
+## Archived segments
+
+With an [archive](/docs/kronosdb/backups) configured, committed segments are copied to object storage, and a node over its disk limit can delete its local copy of an archived segment. The key tables and locators stay on the node, so a query finds its positions as before, and only the record bytes are read from the archive, by byte range.
+
+## Related
+
+- [Durability](/docs/kronosdb/durability) covers how written records become durable.
+- [Indexes](/docs/kronosdb/indexes) covers the files written beside a sealed segment.
+- [Back up and restore](/docs/kronosdb/backups) covers copying data directories and configuring the archive.

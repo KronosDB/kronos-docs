@@ -1,0 +1,26 @@
+---
+title: Durability
+description: "How KronosDB makes appended events durable with commit waves, and when an append is acknowledged."
+---
+
+An append is acknowledged once its events are durable, which means they survive a crash or power failure. This page describes how the server gets written records to that point with as few disk syncs as possible.
+
+## Commit waves
+
+Writing a record puts its bytes in the operating system's page cache, which does not survive a power failure. To make writes durable, the server groups them into commit waves. An append writes its records and joins the current wave. A sync thread closes the wave, calls `fdatasync` once for every record in it, and then moves the commit watermark past it. Appends that arrive while a sync is running join the next wave.
+
+<GroupCommitAnimation />
+
+An append is acknowledged when the watermark passes its last event, and reads return only events below the watermark, so a client never reads an event that could still be lost. The size of a wave adjusts to the load: one append on an idle server gets a wave of its own, and under load each `fdatasync` covers many appends. There is no timer by default; `group-commit-ms` adds a wait before each sync.
+
+In a cluster, the watermark is the position that a majority of the voters have reached, so an acknowledgement waits for that majority. Whether "reached" means written or synced is the `ack-mode` setting, described in [Configuration](/docs/kronosdb/configuration) and [Clustering and replication](/docs/kronosdb/replication).
+
+## When a sync fails
+
+If a commit wave cannot be made durable, for example because `fdatasync` fails or the commit thread stops, the server cannot make the written events durable, so it stops accepting appends. Pending and later appends fail with `internal` and a message that the event store is poisoned, and the node accepts appends again after a restart.
+
+## Related
+
+- [Segments and records](/docs/kronosdb/segments) describes the files the records are written to.
+- [Clustering and replication](/docs/kronosdb/replication) covers acknowledgement in a cluster.
+- [Configuration](/docs/kronosdb/configuration) lists `ack-mode` and `group-commit-ms`.

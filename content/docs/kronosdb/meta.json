@@ -18,6 +18,9 @@
     "monitoring",
     "admin-console",
     "---How KronosDB works---",
-    "storage-and-indexing"
+    "segments",
+    "durability",
+    "indexes",
+    "reads"
   ]
 }
