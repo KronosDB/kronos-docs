@@ -207,90 +207,140 @@ export function IndexingAnimation() {
   )
 }
 
-// ── 4. Merging: eight key tables become one, and eight of those become one ──
+// ── 4. Merging, recursively: zoom out a level each time eight tables merge ──
+
+const SEGMENT_W = 74
+const MERGE_GAP = 64
+const MERGE_TOP = 40
+const MERGE_LEFT = 24
+/** Where the row in view sits on screen; the level below sits one row above it. */
+const CURRENT_Y = 104
+const rowY = (level: number) => MERGE_TOP + level * MERGE_GAP
+const tableW = (level: number) => SEGMENT_W * 8 ** level
 
 export function MergeAnimation() {
-  // phases: 0 seven level-1 tables and eight segment key tables · 1 the eight merge into the eighth level-1 table
-  //         · 2 eight level-1 tables · 3 they merge into one level-2 table · 4 hold
-  const left = 24
-  const cell = 9.25
-  const group = cell * 8
-  const segX = (segment: number) => left + segment * cell
-  const groupX = (index: number) => left + index * group
-  const rowSegments = 44
-  const rowKeys = 74
-  const rowLevel1 = 104
-  const rowLevel2 = 150
+  // phases: 0 eight segments · 1 their key tables merge into level 1 · 2 zoom out
+  //         · 3 eight level-1 tables merge into level 2 · 4 zoom out · 5 merge into level 3 · 6 hold
   return (
-    <Animation label="Eight segments' key tables merge into one level-1 table, and eight level-1 tables merge into one level-2 table covering 64 segments." phases={5} ms={1500} viewBox="0 0 640 200">
-      {(phase) => (
-        <>
-          <Label x={left} y={24} size={12} muted>
-            64 committed segments
-          </Label>
-          {Array.from({ length: 64 }, (_, segment) => (
-            <rect
-              key={segment}
-              x={segX(segment) + 1}
-              y={rowSegments - 12}
-              width={cell - 2}
-              height={18}
-              rx={2}
-              style={{ fill: "var(--color-fd-muted)", stroke: "var(--color-fd-border)" }}
-            />
-          ))}
-
-          {/* the last group's own key tables */}
-          {Array.from({ length: 8 }, (_, index) => (
-            <At key={index} x={phase === 0 ? segX(56 + index) + 1 : groupX(7) + 4} y={phase === 0 ? rowKeys - 10 : rowLevel1 - 10} show={phase === 0}>
-              <rect width={cell - 2} height={20} rx={2} style={{ fill: accent(30), stroke: "var(--color-fd-primary)" }} />
-            </At>
-          ))}
-          <At x={segX(56)} y={rowKeys + 22} show={phase === 0}>
-            <Label size={10.5} muted>
-              .keys of S56–S63
+    <Animation
+      label="Eight segments' key tables merge into a level-1 table. Zoomed out, eight level-1 tables merge into a level-2 table, and zoomed out again, eight level-2 tables merge into a level-3 table covering 512 segments."
+      phases={7}
+      ms={1700}
+      hold={3000}
+      viewBox="0 0 640 214"
+    >
+      {(phase) => {
+        const zoom = phase <= 1 ? 0 : phase <= 3 ? 1 : 2
+        const scale = 1 / 8 ** zoom
+        const span = 8 ** zoom
+        const merged = phase % 2 === 1 || phase === 6
+        const camera = `translate(${MERGE_LEFT}px, ${CURRENT_Y - rowY(zoom)}px) scale(${scale}, 1)`
+        return (
+          <>
+            <defs>
+              <clipPath id="kx-merge-clip">
+                <rect x={MERGE_LEFT} y={28} width={8 * SEGMENT_W} height={186} />
+              </clipPath>
+            </defs>
+            <Label x={MERGE_LEFT} y={20} size={12} muted>
+              {`${8 * span} committed segments`}
             </Label>
-          </At>
+            <g clipPath="url(#kx-merge-clip)">
+              <g className="kx-zoom" style={{ transform: camera }}>
+                {[0, 1, 2, 3].map((level) => (
+                  <MergeRow key={level} level={level} phase={phase} zoom={zoom} />
+                ))}
+                {[0, 1, 2].map((level) => (
+                  <MergePieces key={level} level={level} phase={phase} zoom={zoom} />
+                ))}
+              </g>
+            </g>
 
-          {/* level-1 tables, one per group of eight segments */}
-          {Array.from({ length: 8 }, (_, index) => {
-            const built = index < 7 || phase >= 1
-            const merging = phase >= 3
-            return (
-              <At
-                key={index}
-                x={merging ? groupX(0) + (group * 8 - group) / 2 : groupX(index) + 2}
-                y={merging ? rowLevel2 - 10 : rowLevel1 - 10}
-                show={built && phase < 4}
+            {/* labels for the row in view, in screen space */}
+            {Array.from({ length: 8 }, (_, index) => (
+              <Label
+                key={`${zoom}-${index}`}
+                x={MERGE_LEFT + index * SEGMENT_W + SEGMENT_W / 2}
+                y={CURRENT_Y + 23}
+                size={zoom === 0 ? 12 : 10}
+                anchor="middle"
+                mono
               >
-                <rect width={group - 4} height={20} rx={4} style={{ fill: accent(index === 7 && phase <= 2 ? 40 : 24), stroke: "var(--color-fd-primary)" }} />
-                <Label x={(group - 4) / 2} y={14} size={10} anchor="middle" mono>
-                  L1
-                </Label>
-              </At>
-            )
-          })}
-          <At x={left} y={rowLevel1 + 30} show={phase >= 1 && phase < 3}>
-            <Label size={10.5} muted>
-              level 1: 8 segments each
-            </Label>
-          </At>
-
-          {/* the level-2 table */}
-          <At x={left + 2} y={rowLevel2 - 10} show={phase >= 4}>
-            <rect width={group * 8 - 4} height={20} rx={4} style={{ fill: accent(40), stroke: "var(--color-fd-primary)" }} strokeWidth={1.5} />
-            <Label x={(group * 8 - 4) / 2} y={14} size={10.5} anchor="middle" weight={600}>
-              level 2: one key table for S0–S63
-            </Label>
-          </At>
-          <At x={left} y={190} show={phase >= 4}>
-            <Label size={11} muted>
-              Eight level-2 tables merge into a level-3 table for 512 segments, and so on.
-            </Label>
-          </At>
-        </>
-      )}
+                {zoom === 0 ? `S${index}` : `S${index * span}–${(index + 1) * span - 1}`}
+              </Label>
+            ))}
+            <g className="kx-move" style={{ opacity: merged ? 1 : 0, transitionDelay: merged ? "900ms" : "0ms" }}>
+              <Label x={MERGE_LEFT + (8 * SEGMENT_W) / 2} y={CURRENT_Y + MERGE_GAP + 23} size={12} anchor="middle" weight={600}>
+                {`level ${zoom + 1} key table: S0–S${8 * span - 1}`}
+              </Label>
+            </g>
+          </>
+        )
+      }}
     </Animation>
+  )
+}
+
+/** One level's tables (level 0 = the segments). */
+function MergeRow({ level, phase, zoom }: { level: number; phase: number; zoom: number }) {
+  const count = 512 / 8 ** level
+  const width = tableW(level)
+  const inView = level >= zoom - 1 && level <= zoom + 1
+  return (
+    <g className="kx-move" style={{ opacity: inView ? (level < zoom ? 0.45 : 1) : 0 }}>
+      {Array.from({ length: count }, (_, index) => {
+        // the first table of a level appears when it is merged, the rest when the camera reaches its level
+        const shown = level === 0 || (index === 0 ? phase >= 2 * level - 1 : phase >= 2 * level)
+        return (
+          <rect
+            key={index}
+            x={index * width + 8 ** zoom}
+            y={rowY(level)}
+            width={width - 2 * 8 ** zoom}
+            height={36}
+            rx={6 * 8 ** zoom}
+            ry={6}
+            vectorEffect="non-scaling-stroke"
+            className="kx-tone"
+            style={{
+              opacity: shown ? 1 : 0,
+              transition: "opacity 450ms ease",
+              transitionDelay: index === 0 && phase === 2 * level - 1 ? "900ms" : "0ms",
+              fill: level === 0 ? "var(--color-fd-muted)" : accent(level === zoom + 1 ? 34 : 22),
+              stroke: level === 0 ? "var(--color-fd-border)" : "var(--color-fd-primary)",
+            }}
+          />
+        )
+      })}
+    </g>
+  )
+}
+
+/** The eight tables of one level dropping into the row below as they merge. */
+function MergePieces({ level, phase, zoom }: { level: number; phase: number; zoom: number }) {
+  const width = tableW(level)
+  const moving = phase === 2 * level + 1
+  return (
+    <>
+      {Array.from({ length: 8 }, (_, index) => (
+        <g
+          key={`${index}-${moving}`}
+          className={moving ? "kx-drop" : undefined}
+          style={{ opacity: moving ? undefined : 0, ["--kx-drop" as string]: `${MERGE_GAP}px` }}
+        >
+          <rect
+            x={index * width + 8 ** zoom}
+            y={rowY(level)}
+            width={width - 2 * 8 ** zoom}
+            height={36}
+            rx={6 * 8 ** zoom}
+            ry={6}
+            vectorEffect="non-scaling-stroke"
+            style={{ fill: accent(30), stroke: "var(--color-fd-primary)" }}
+          />
+        </g>
+      ))}
+    </>
   )
 }
 

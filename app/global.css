@@ -96,6 +96,21 @@ h1, h2, h3 { letter-spacing: -0.02em; }
 .kx-move { transition: transform 650ms cubic-bezier(0.4, 0, 0.2, 1), opacity 400ms ease; transform-box: view-box; }
 .kx-tone { transition: fill 400ms ease, stroke 400ms ease; }
 .kx-grow { transition: width 1100ms linear; }
+.kx-drop { animation: kx-drop 1500ms cubic-bezier(0.4, 0, 0.2, 1) both; }
+@keyframes kx-drop {
+  0% { transform: translateY(0); opacity: 1; }
+  45% { transform: translateY(var(--kx-drop)); opacity: 1; }
+  70% { transform: translateY(var(--kx-drop)); opacity: 1; }
+  100% { transform: translateY(var(--kx-drop)); opacity: 0; }
+}
+.kx-zoom { transition: transform 1200ms cubic-bezier(0.4, 0, 0.2, 1); transform-box: view-box; transform-origin: 0 0; }
 @media (prefers-reduced-motion: reduce) {
-  .kx-move, .kx-tone, .kx-grow { transition: none; }
+  .kx-move, .kx-tone, .kx-grow, .kx-drop { animation: kx-drop 1500ms cubic-bezier(0.4, 0, 0.2, 1) both; }
+@keyframes kx-drop {
+  0% { transform: translateY(0); opacity: 1; }
+  45% { transform: translateY(var(--kx-drop)); opacity: 1; }
+  70% { transform: translateY(var(--kx-drop)); opacity: 1; }
+  100% { transform: translateY(var(--kx-drop)); opacity: 0; }
+}
+.kx-zoom { transition: none; }
 }
