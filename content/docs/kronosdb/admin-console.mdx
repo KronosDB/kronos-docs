@@ -21,7 +21,7 @@ Every client connected to this node, with its client id, component name, library
 
 ## Events
 
-A browser for the events of one context, newest first. Pick the context, filter by event name and by a tag as `key=value`, choose a page size of 25, 50, 100 or 200, and page back through the log. Each row opens to show the event's details. The page refreshes every three seconds while you are on the first page, and a Live toggle stops it.
+A browser for the events of one context, newest first. Pick the context, filter by event name and by a tag as `key=value`, choose a page size of 25, 50, 100 or 200, and page back through the log. Each row opens to show the event's details. When the node has removed its oldest segments from its disk because of [`max-local-bytes`](/docs/kronosdb/backups#cap-the-disk-a-node-uses), a search with a filter covers only the events still on the disk, and a note above the table offers Search the archive. The page refreshes every three seconds while you are on the first page, and a Live toggle stops it.
 
 This page also lists the system events that clients cannot read. [Monitor a server](/docs/kronosdb/monitoring#look-at-system-events) describes them.
 
@@ -45,7 +45,7 @@ The node's id and type, whether clustering is configured, and a table of the pee
 
 ## Settings
 
-A read-only view of the node's effective configuration in five groups: server (name, addresses, data directory, version), storage (segment size, cache sizes, group commit), timeouts, cluster (node id, type, number of peers) and security (client authentication methods, TLS and CA state). Secrets are never shown.
+A read-only view of the node's effective configuration in five groups: server (name, addresses, data directory, version), storage (segment size, block cache size, group commit), timeouts, cluster (node id, type, number of peers and learners) and security (client authentication methods, TLS and CA state). Secrets are never shown.
 
 ## Authentication
 

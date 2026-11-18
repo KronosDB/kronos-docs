@@ -54,7 +54,9 @@ const eventStore = upcastingEventStore(inMemorySnapshottingEventStore(log), cate
 })
 ```
 
-The `storedTypes` option returns, for a type a processor handles, the names events of that type are stored under. This upcaster keeps the name, so a type maps to itself. Without the option the processor still receives the right events, but reads every event in the log.
+The `storedTypes` option returns, for a type that a processor handles, a state folds or an append condition names, the names events of that type are stored under. This upcaster keeps the name, so a type maps to itself. If a later change renames an event, list the old name in the result, for example `(type) => (type === "toolstore.ToolRegistered" ? [type, "toolstore.ToolAdded"] : [type])`, and a state that folds `ToolRegistered` reads the events stored as `ToolAdded` through the upcaster.
+
+Without the option, reads and streams still return the right events, but they read every event that carries the same tags. An append condition then checks every event with its tags, whatever its type, so a command can report a conflict that the type filter would have excluded.
 
 When the store is also a snapshotting store, put the upcasting wrapper outermost, as above. With Postgres that reads `upcastingEventStore(postgresSnapshottingEventStore(postgresEventStore(pg), pg, serializer), categoryAdded, { storedTypes: (type) => [type] })`. Then the handlers and the processor use the new shape with no other edit.
 

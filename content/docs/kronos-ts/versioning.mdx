@@ -98,27 +98,15 @@ export const storedTypes = (type: string) =>
   type === "toolstore.RentalLapsed" ? [type, "toolstore.RentalOverdue"] : [type]
 ```
 
-The example renames `RentalOverdue` to `RentalLapsed`. The `storedTypes` option of `upcastingEventStore` receives a type that a stream requests and returns the stored names that upcast to it, the type itself included when events are still written under it. A processor that handles `RentalLapsed` opens its stream for that name, and the wrapper queries the log for both names.
+The example renames `RentalOverdue` to `RentalLapsed`. The `storedTypes` option of `upcastingEventStore` receives the type a read or stream filters on and returns the stored names that upcast to it, the type itself included when events are still written under it.
 
 ```ts
 const eventStore = upcastingEventStore(log, lapsedRentals, { storedTypes })
 ```
 
-Without `storedTypes`, a processor still receives every event it handles, but the store cannot filter the log by type, so the processor reads and discards more events. An upcast that changes only the version or the payload keeps the name, and `(type) => [type]` is the value for it, which keeps the type filter.
+The wrapper uses `storedTypes` wherever the log is filtered by type: a processor's stream, a state's read, and the append condition of a command. A processor that handles `RentalLapsed` receives the events stored as `RentalOverdue`, converted. A state that folds `RentalLapsed` reads them too, and an append conditioned on `RentalLapsed` conflicts with an event appended under the old name.
 
-The option applies to processors. A state reads only the event names of its own evolvers, so a state that folds `RentalLapsed` does not read the events stored as `RentalOverdue`. To make the state read both, list the old descriptor as an evolver as well. The upcast turns the old events into `RentalLapsed` events, and the fold applies the `RentalLapsed` evolver to them.
-
-```ts
-export const Lapse = state({
-  id: { toolId: z.string() },
-  tags: (id) => ({ toolId: id.toolId }),
-  evolve: [
-    () => ({ lapsed: false }),
-    [RentalLapsed, (lapse) => ({ ...lapse, lapsed: true })],
-    [RentalOverdue, (lapse) => lapse],
-  ],
-})
-```
+Without `storedTypes`, the wrapper cannot translate a type filter, so it drops it. Reads and streams still return only the requested types, after upcasting, but they read every event that matches the tags. An append condition checks every event that carries its tags, whatever its type, so it can report conflicts that a type filter would have excluded. An upcast that changes only the version or the payload keeps the name, and `(type) => [type]` is the value to pass for it, which keeps the type filter.
 
 ## Snapshots and read models
 

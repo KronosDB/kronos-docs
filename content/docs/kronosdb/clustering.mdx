@@ -14,7 +14,7 @@ Each node needs its own id, a name, a data volume and the same peer list. The pe
 ```yaml
 # compose.yaml
 x-node: &node
-  image: ghcr.io/kronosdb/kronosdb:0.11.0
+  image: ghcr.io/kronosdb/kronosdb:0.15.0
   restart: unless-stopped
   stop_grace_period: 30s
   healthcheck:
@@ -119,10 +119,10 @@ alerts:
 
 ```sh
 helm install kronosdb oci://ghcr.io/kronosdb/charts/kronosdb \
-  --version 0.11.0 -f values.yaml
+  --version 0.15.0 -f values.yaml
 ```
 
-With the release named `kronosdb`, the pods are `kronosdb-0`, `kronosdb-1` and `kronosdb-2` with node ids 1, 2 and 3, and the services are `kronosdb` (clients on 50051) and `kronosdb-admin` (port 9240). The chart fails to render with admin token mode and no admin token, and prints a warning after install when the client port has no token or backups are off.
+With the release named `kronosdb`, the pods are `kronosdb-0`, `kronosdb-1` and `kronosdb-2` with node ids 1, 2 and 3, and the services are `kronosdb` (clients on 50051) and `kronosdb-admin` (port 9240). The chart fails to render with admin token mode and no admin token, and prints a warning after install when the client port has no token, the admin port has no authentication, or `learners.replicas` is 0, which means there is no [passive-backup learner](/docs/kronosdb/backups#keep-a-passive-backup-learner).
 
 Choose local disks for the storage class. Each acknowledged write is already replicated to a majority, so a replicated network volume replicates each write twice. `serviceMonitor.enabled` adds a Prometheus Operator `ServiceMonitor` for `/metrics`, and `alerts.enabled` adds the `PrometheusRule` described in [Monitor a server](/docs/kronosdb/monitoring).
 
@@ -196,6 +196,8 @@ The peer list is read at startup and is not reconciled with the stored membershi
 - `POST /api/cluster/add-learner` adds a node that replicates without voting.
 - `POST /api/cluster/add-voter` adds the node as a learner if it is not a member yet, and promotes it to voter.
 - `POST /api/cluster/remove-node` takes a voter out of the membership. Its body is only `{"id": 4}`.
+
+Learners that you name in `KRONOSDB_CLUSTER_LEARNERS` need no request. Every node keeps trying in the background to add them, retrying with a delay that grows from 250 ms to 5 s until each learner is in the membership, and only the attempt on the leader succeeds. The chart sets the variable when `learners.replicas` is above 0.
 
 A promoted voter joins the majority at once, so one that is still catching up would stall every acknowledgement. `add-voter` therefore returns status 409 when the node is more than 1024 positions behind in any context, or has reported no progress for a context that has events, and it must be sent to the node that holds the claim. Pass `"force": true` to promote anyway. Start the new node first, with an unused `KRONOSDB_CLUSTER_NODE_ID` and the existing voters in `KRONOSDB_CLUSTER_PEERS`, so that it is running at the address you give. Then send each request to the node that holds the claim: add the node as a learner, wait until it has caught up, and promote it.
 

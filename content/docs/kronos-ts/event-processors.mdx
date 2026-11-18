@@ -164,13 +164,14 @@ replaying  false
 
 `position` is the lowest position among the segments this node holds. `caughtUp` is true when every segment has handled the events available to it. `replaying` is true during a replay. `error` is the most recent unrecovered processing error, and it is absent when there is none. `segments()` reports the same fields for each segment this node holds, with the segment's `segment` id. `stop()` stops handling, writes where each segment got to and releases the segments so another node can take them at once. `app.stop()` stops every processor, and a stopped processor continues from its stored position when started again.
 
-`kronos()` starts every processor without waiting for it, so a failure of a processor's first start does not reach its caller. Check `status()`, or call `start()` yourself, to find out.
+A processor that cannot claim its segments, for example because the token store is down when the app starts, keeps running. The failure is logged and reported as `status().error`, and the processor tries again every half claim timeout (5 seconds by default) until it succeeds. `kronos()` and `start()` do not throw for it.
 
 ## Errors
 
 | Error | When | What happens |
 | --- | --- | --- |
 | Handler error | A handler throws or rejects. | The batch rolls back and is retried, or the event is parked. The error is logged and set as `status().error`. |
+| Claim failure | The token store fails while the processor claims its segments. | Logged and set as `status().error`. The claim is retried every half claim timeout until it succeeds. |
 | `UnableToClaimTokenError` | Another node holds a segment, or this node lost its claim. Test with `isUnableToClaimToken`. | A segment held elsewhere is skipped. A node that lost its claim fails its batch and stops handling the segment. |
 | `DeadLetterQueueOverflowError` | The queue is full when a letter is parked. | The batch is retried with backoff, so the processor stalls until the queue has room. |
 | Boot error from `kronos()` | An event handler has no `processor`, or two entries name one processor with different settings. | `kronos()` throws and names the entries. |

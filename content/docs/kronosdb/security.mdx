@@ -15,7 +15,7 @@ The admin port starts with authentication mode `none`, which also logs a warning
 
 ## Require a token on the client port
 
-Setting a shared token on the client port makes every client present a credential in its handshake. The same token is what cluster nodes use to authenticate to each other, so it carries full access.
+Setting a shared token on the client port makes every client present a credential in its handshake. The same token is what cluster nodes use to authenticate to each other, so it carries full access. The server refuses to start when a config file has a key it does not accept, in any table, so a misspelled security key cannot leave a port open. The error it prints is shown under [Sources and precedence](/docs/kronosdb/configuration#sources-and-precedence) in the configuration reference.
 
 ```toml
 [security]

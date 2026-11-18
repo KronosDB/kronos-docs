@@ -80,10 +80,11 @@ console.log(app.processors.get("inventory-view")?.running)
 | `kronos: entry "toolstore.AddTool" is a command handler and appends to a log, but no event store was attached` | A command handler entry has no `eventStore`. | Spread an `eventStore` onto the entry. |
 | `kronos: event handler "toolstore.ToolAdded" has no processor` | An event handler entry has no `processor`. | Spread a processor from `eventProcessor(name, eventStore, tokenStore, unitOfWork)` onto the entry. |
 | `kronos: two event handlers name a processor called "inventory-view" but configure it differently` | Two entries use one processor name with different settings. The message lists which settings differ. | Pass one `eventProcessor(...)` value to both entries, or give them different names. |
-| `A different handler is already registered for command "toolstore.AddTool"` | Two different handlers subscribe the same command name, or the same query name, on one bus. | Keep one handler for each name on a bus. |
+| `kronos: two command handlers subscribe to command "toolstore.AddTool" on the same command bus` | Two entries subscribe a handler for the same command, or the same query, on one bus. The message names both entries. | Keep one handler for each name on a bus. |
+| `A different handler is already registered for command "toolstore.AddTool"` | The bus already has a handler for that name from outside this `kronos()` call, for example from an earlier app that was not stopped. | Use a fresh bus, or stop the app that subscribed the first handler. |
 | `kronos: entry "toolstore.AddTool" is not configured properly` | A wrapper on the handler needs something that no wrapper outside it provides. | Reorder the wrappers as the hint in the message directs. |
 
-Wrapper chains are checked first, then command and query handlers are subscribed in list order, and the processor groups are built last. A processor error therefore comes after the command and query handlers have been subscribed, and those subscriptions stay on their buses. Build new buses before assembling again after a failed boot.
+`kronos()` runs all of these checks before it subscribes any handler or starts any processor. A boot that fails leaves the buses as they were, so you can fix the lists and pass the same buses to `kronos()` again.
 
 A processor that fails once the app is running does not surface through `kronos()`. Its failures are retried or dead-lettered as described in [Event processors](/docs/kronos-ts/event-processors), and `status()` on the running processor reports the most recent error that was not recovered.
 

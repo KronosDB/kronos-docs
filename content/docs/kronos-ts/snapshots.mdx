@@ -45,10 +45,6 @@ export const returnTool = commandHandler(ReturnTool, async ({ payload }, ctx) =>
 
 The event store on the handler's entry has to be wrapped for snapshots, as described under [Wrapping the event store](#wrapping-the-event-store).
 
-<Callout type="warn">
-  Load either the original state or the wrapped one through a given event store, not both. Both count as the same state, so whichever is loaded first determines whether snapshots are used for both.
-</Callout>
-
 ## The key
 
 The key is a string you choose, and it is the only thing that ties a snapshot to a fold. Kronos stores each instance of the state under `<key>:<id>`, so `customer-history-v1` serves every customer without collisions.

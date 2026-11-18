@@ -7,17 +7,17 @@ This guide starts one KronosDB node in Docker, checks that it is healthy, declar
 
 ## Start the node
 
-The server is published as a multi-architecture image (linux/amd64 and linux/arm64) at `ghcr.io/kronosdb/kronosdb`. Each release is tagged with its version, and `latest` is the newest one. The command below publishes the client port and the admin port and keeps the data in a named volume.
+The server is published as a multi-architecture image (linux/amd64 and linux/arm64) at `ghcr.io/kronosdb/kronosdb`. Each release is tagged with its version. The command below publishes the client port and the admin port and keeps the data in a named volume.
 
 ```sh
 docker run -d --name kronosdb \
   -p 50051:50051 -p 9240:9240 \
   -v kronosdb-data:/data \
   -e KRONOSDB_DEV=1 \
-  ghcr.io/kronosdb/kronosdb:latest
+  ghcr.io/kronosdb/kronosdb:0.15.0
 ```
 
-The image runs `kronosdb-server` as the unprivileged user `kronosdb` and listens on `0.0.0.0:50051` for clients and peers and on `0.0.0.0:9240` for the admin console, probes and metrics. Everything it stores is under `/data`, which is declared as a volume. Pin a version tag such as `ghcr.io/kronosdb/kronosdb:0.11.0` for anything you keep.
+The image runs `kronosdb-server` as the unprivileged user `kronosdb` and listens on `0.0.0.0:50051` for clients and peers and on `0.0.0.0:9240` for the admin console, probes and metrics. Everything it stores is under `/data`, which is declared as a volume. Keep the version tag for anything you keep, so that an upgrade is a change you make.
 
 `KRONOSDB_DEV=1` turns on dev mode. At startup the server checks the data disk and its environment and normally logs problems such as a slow fsync or an in-memory filesystem as warnings. Dev mode logs them at info level, so a laptop does not fill the log with warnings, and it should be off on a production server.
 

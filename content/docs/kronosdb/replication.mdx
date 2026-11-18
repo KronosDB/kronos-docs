@@ -56,8 +56,8 @@ An operator adds and removes nodes through the admin API or the admin console. A
 | Failure | When |
 | --- | --- |
 | `unavailable` | An election is running, a new leader is taking over, a membership change is in progress, a majority is unreachable, or leadership was lost during an append. |
-| `corrupted` | A replicated record failed its checksum. |
-| `internal` | An fsync failure poisoned the event store, or a node found that its log holds a leader term beyond the cluster's current one. |
+| `corrupted` | A replicated record failed an integrity check. |
+| `internal` | A group-commit failure poisoned the event store, or a node found that its log holds a leader term beyond the cluster's current one. |
 
 ## Related
 

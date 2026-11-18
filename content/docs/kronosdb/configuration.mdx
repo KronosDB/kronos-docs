@@ -9,7 +9,13 @@ The `kronosdb-server` binary reads its settings from command-line flags, environ
 
 A setting resolves from the first source that provides it, in this order: command-line flag, environment variable, config file, default. A flag and its environment variable are the same setting, so `--listen 0.0.0.0:50051` and `KRONOSDB_LISTEN=0.0.0.0:50051` are equivalent.
 
-The config file is TOML. `--config` (short form `-c`, environment variable `KRONOSDB_CONFIG`) names it. Without that setting the server reads `kronosdb.toml` in its working directory when the file exists. A file that cannot be parsed stops the server at startup. Unrecognized keys are ignored outside the `[[security.tokens]]`, `[[security.issuers]]` and `[[security.grants]]` entries, so a misspelled key leaves the default in place.
+The config file is TOML. `--config` (short form `-c`, environment variable `KRONOSDB_CONFIG`) names it. Without that setting the server reads `kronosdb.toml` in its working directory when the file exists. A file that cannot be parsed stops the server at startup, and so does a key the server does not accept, in any table. The error names the key, its table, its line and the file, and lists the keys that table accepts, so a misspelled `ack-mod` under `[storage]` fails with this message:
+
+```text
+Error: "config file '/etc/kronosdb/kronosdb.toml' has an unknown key `ack-mod` in table [storage] (line 7). Fix its spelling or move it to the table it belongs to, or remove it. Keys accepted there: `segment-size`, `read-path`, `block-cache-bytes`, `block-size`, `readahead-blocks`, `index-merge-rate`, `ack-mode`, `max-snapshot-size`."
+```
+
+The [manifest](/docs/kronosdb/contexts#the-manifest) file is read differently and ignores keys it does not use.
 
 ```toml
 # kronosdb.toml
@@ -55,11 +61,14 @@ TLS for the client port is configured under [Auth](#auth). A single request is l
 | Config file key | Flag | Environment variable | Default | Meaning |
 | --- | --- | --- | --- | --- |
 | `[storage] segment-size` | `--segment-size` | `KRONOSDB_SEGMENT_SIZE` | `268435456` (256 MiB) | Size at which a context rolls to a new segment file. |
-| `[storage] index-cache-bytes` | `--index-cache-bytes` | `KRONOSDB_INDEX_CACHE_BYTES` | `1073741824` (1 GiB) | Heap budget for cached segment indexes. |
-| `[storage] bloom-cache-bytes` | `--bloom-cache-bytes` | `KRONOSDB_BLOOM_CACHE_BYTES` | `134217728` (128 MiB) | Heap budget for cached bloom filters. |
+| `[storage] read-path` | `--read-path` | `KRONOSDB_READ_PATH` | `mapped` | How sealed segments are read. `mapped` reads through a memory mapping and checks every record's CRC on every read. `blocks` reads through a cache of verified record blocks. |
+| `[storage] block-cache-bytes` | `--block-cache-bytes` | `KRONOSDB_BLOCK_CACHE_BYTES` | `268435456` (256 MiB) | Memory budget of the cache of verified record blocks that sealed segments are read through. |
+| `[storage] block-size` | `--block-size` | `KRONOSDB_BLOCK_SIZE` | `16384` (16 KiB) | Target size of one cached block. |
+| `[storage] readahead-blocks` | `--readahead-blocks` | `KRONOSDB_READAHEAD_BLOCKS` | `16` | Blocks read ahead of a sequential reader. |
+| `[storage] index-merge-rate` | `--index-merge-rate` | `KRONOSDB_INDEX_MERGE_RATE` | `67108864` (64 MiB) | Bytes per second a background index merge may write. `0` means unlimited. |
 | `[storage] max-snapshot-size` | `--max-snapshot-size` | `KRONOSDB_MAX_SNAPSHOT_SIZE` | `4194304` (4 MiB) | Largest snapshot state a client may store. Snapshot records share the log with events, and a larger blob is rejected. |
 
-The index and bloom budgets together should stay well under half of the memory the node has, because reads use the operating system's page cache. The startup hardware check reports a `low_memory` finding when they exceed half.
+The block cache budget should stay well under half of the memory the node has, because reads also use the operating system's page cache. The startup hardware check reports a `low_memory` finding when the budget exceeds half.
 
 ## Durability
 
@@ -71,14 +80,15 @@ The index and bloom budgets together should stay well under half of the memory t
 
 ## Cluster
 
-[Run a cluster](/docs/kronosdb/clustering) describes how these fit together. They are set with flags or environment variables, and have no config file key.
+[Run a cluster](/docs/kronosdb/clustering) describes how these fit together. Apart from `replication-inflight-bytes`, they are set with flags or environment variables and have no config file key.
 
 | Config file key | Flag | Environment variable | Default | Meaning |
 | --- | --- | --- | --- | --- |
 | none | `--cluster-node-id` | `KRONOSDB_CLUSTER_NODE_ID` | unset (treated as `1`) | Numeric id of this node. It must be unique in the cluster and stay the same across restarts. |
 | none | `--cluster-peers` | `KRONOSDB_CLUSTER_PEERS` | empty | Comma-separated `id=address` entries for every voter, this node included, for example `1=node1:50051,2=node2:50051,3=node3:50051`. Empty means a single-node cluster. Use stable host names, because the addresses are stored in the cluster's membership. |
-| none | `--cluster-learners` | `KRONOSDB_CLUSTER_LEARNERS` | empty | Comma-separated `id=address` entries for passive-backup learners the node adds to the membership at startup. |
+| none | `--cluster-learners` | `KRONOSDB_CLUSTER_LEARNERS` | empty | Comma-separated `id=address` entries for passive-backup learners. Every node keeps trying, from startup, to add them to the membership until each is a member. |
 | none | `--cluster-node-type` | `KRONOSDB_CLUSTER_NODE_TYPE` | `standard` | `standard` for a voter, or `passive-backup` for a learner that replicates everything and never votes. |
+| `replication-inflight-bytes` | `--replication-inflight-bytes` | `KRONOSDB_REPLICATION_INFLIGHT_BYTES` | `67108864` (64 MiB) | Most unacknowledged bytes the leader keeps in flight to one follower. |
 
 ## Auth
 
@@ -150,14 +160,15 @@ The admin port is configured separately from the client port. The default mode i
 | `[admin.oidc] cookie-secret` | `--oidc-cookie-secret` | `KRONOSDB_OIDC_COOKIE_SECRET` | random per start | Key that signs session cookies. Set it so sessions survive restarts and work across replicas. |
 | `[admin.oidc] session-ttl-minutes` | none | none | `480` | Lifetime of a console session. |
 
-## Backup
+## Archive
 
 | Config file key | Flag | Environment variable | Default | Meaning |
 | --- | --- | --- | --- | --- |
-| `[backup] url` | `--backup-url` | `KRONOSDB_BACKUP_URL` | unset | Object store that receives sealed segments, such as `s3://bucket/prefix` or `file:///backups/kronosdb`. Unset turns the upload off. Cloud credentials come from the standard environment variables of the provider. |
-| `[backup] interval-secs` | `--backup-interval-secs` | `KRONOSDB_BACKUP_INTERVAL_SECS` | `30` | Seconds between upload passes on the leader. |
+| `[archive] url` | `--archive-url` | `KRONOSDB_ARCHIVE_URL` | unset | Object store that receives sealed segments, such as `s3://bucket/prefix`, `gs://bucket/prefix`, `az://container/prefix` or `file:///backups/kronosdb`. Unset turns the archive off. Cloud credentials come from the standard environment variables of the provider. |
+| `[archive] interval-secs` | `--archive-interval-secs` | `KRONOSDB_ARCHIVE_INTERVAL_SECS` | `30` | Seconds between archive passes on the leader, and between eviction passes on every node. At least `1`. |
+| `[archive] max-local-bytes` | `--archive-max-local-bytes` | `KRONOSDB_ARCHIVE_MAX_LOCAL_BYTES` | unset | Most bytes this node keeps on disk for its logs, segments and index files together. Past it, the oldest archived segments are removed from the disk and read from the archive. Needs `url`. Unset keeps everything, and `0` is refused. |
 
-What the upload does and does not give you is described in [Back up and restore](/docs/kronosdb/backups).
+What the archive does and does not give you is described in [Back up and restore](/docs/kronosdb/backups).
 
 ## Limits and timeouts
 

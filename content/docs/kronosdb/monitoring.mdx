@@ -47,13 +47,16 @@ The metrics worth watching are these.
 | `kronosdb_events_appended_total` | counter | Events appended. |
 | `kronosdb_dcb_violations_total` | counter | Appends rejected by a consistency condition. |
 | `kronosdb_ack_degradations_total` | counter | Appends acknowledged after the write instead of after the fsync because the disk was behind. |
-| `kronosdb_engine_poisoned` | gauge | 1 after an fsync failure. The context rejects every write until the node restarts. |
+| `kronosdb_engine_poisoned` | gauge | 1 after a group commit fails, for example on an fsync error. The context rejects every write until the node restarts. |
 | `kronosdb_data_dir_bytes` | gauge | Bytes on disk under the context's directory. |
 | `kronosdb_raft_leader_known` | gauge | 1 when the node has a leader. |
 | `kronosdb_raft_is_leader` | gauge | 1 when this node is the leader. |
 | `kronosdb_native_epoch` | gauge | Rises by at least one for each new leader. |
 | `kronosdb_native_write_gate_open` | gauge | 1 when this node may execute appends locally, which is true on the leader only. |
 | `kronosdb_hardware_finding{check,severity}` | gauge | 1 for each startup check that found something, listed below. |
+| `kronosdb_archive_last_success_timestamp_seconds` | gauge | Unix time of the last successful archive pass, 0 for never. Reported by the leader, and only with an archive URL. |
+| `kronosdb_archive_lag_events` | gauge | Events in sealed segments that are not archived yet. Reported by the leader. |
+| `kronosdb_archive_evicted_position` | gauge | End of the part of the log that this node removed from its disk. Events below it are read from the archive. |
 | `kronosdb_auth_authenticated_total{method}` | counter | Handshakes that succeeded, by `token`, `jwt` or `mtls`. |
 | `kronosdb_auth_rejected_total{reason}` | counter | Requests rejected, by `unauthenticated` or `permission_denied`. |
 
@@ -86,7 +89,7 @@ At startup each node times writes to its data directory and inspects its environ
 | `slow_fsync` | warning | The probe's fdatasync p99 is 5 ms or more. |
 | `probe_failed` | warning | The probe could not run or timed out. Written acknowledgements are kept in clusters. |
 | `platform_macos` | warning | The node runs on macOS, where every commit is a full fsync. Development only. |
-| `low_memory` | warning | The index and bloom cache budgets are more than half of the node's memory, or of its cgroup limit. |
+| `low_memory` | warning | The block cache budget is more than half of the node's memory, or of its cgroup limit. |
 | `swap_in_use` | warning | 64 MiB or more of swap is in use. |
 | `cpu_limit` | warning | A cgroup CPU limit is below the host's CPU count, which causes latency spikes once the quota is spent. |
 | `few_cores` | warning | Fewer than two CPUs are available. |
@@ -98,6 +101,8 @@ The server records some of its own state as events in each context's log, with t
 ## Set alerts
 
 Three conditions need a person: a poisoned engine, stalled writes and a disk that is filling. With `alerts.enabled=true` the chart installs a `PrometheusRule` with these alerts except the third, which is worth adding, and a disk alert that fires when a data volume has less than 20 percent free for 10 minutes. The replication lag and DCB rejection thresholds are the chart values `alerts.replicationLagEvents` and `alerts.dcbRejectionsPerSecond`, which default to the 100000 and 10 shown.
+
+When `archive.url` is set, the chart adds alerts for the archive. `KronosDBArchiveStalled` fires when no archive pass has succeeded for `alerts.archiveStalledSeconds` (900 by default, and at least three times `archive.intervalSecs`), and `KronosDBArchiveLagHigh` fires when more than `alerts.archiveLagEvents` events (10000000 by default) have waited 30 minutes for the archive. When `archive.maxLocalBytes` is also set, `KronosDBEvictionFailing` fires when a node cannot remove archived segments from its disk, `KronosDBArchiveDivergence` fires at once when a segment on a node differs from its archived copy, and `KronosDBHistoryOnlyInArchive` fires when every node has removed the oldest events of a context from its disk, so that the bucket holds the only copy.
 
 ```yaml
 groups:
@@ -131,7 +136,7 @@ groups:
 
 A poisoned engine is not visible to the probes: the process is up and `/health` returns `ok`, while every append fails until the node restarts. Check the volume before restarting it. A stalled write gate means no node can accept appends, which is a lost majority or an election that is not finishing, and reads continue meanwhile. `kronosdb_raft_leader_known == 0` is the per-node view of the same problem and is not in the chart's rules.
 
-The disk alert matters because the store never deletes, and a full disk ends in a failed fsync and a poisoned engine. Outside the chart, alert on the volume metrics your platform exposes when a volume has less than 20 percent free, and use `kronosdb_data_dir_bytes` to plan its growth.
+The disk alert matters because a full disk ends in a failed fsync and a poisoned engine, and a node keeps every event on its disk unless you set `max-local-bytes`. Outside the chart, alert on the volume metrics your platform exposes when a volume has less than 20 percent free, and use `kronosdb_data_dir_bytes` to plan its growth.
 
 A sustained rise in `kronosdb_dcb_violations_total` is informational. It means many appends are rejected because events matching their condition were appended after the position they read, so the consistency boundaries of those commands overlap often. No change on the server reduces it. A rising `kronosdb_ack_degradations_total` means the disk is slow, and append latency increases.
 

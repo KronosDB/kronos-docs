@@ -1,9 +1,9 @@
 ---
 title: Back up and restore
-description: Copy a KronosDB data directory, keep a passive-backup learner, and upload sealed segments to an object store.
+description: Copy a KronosDB data directory, keep a passive-backup learner, and archive sealed segments to an object store.
 ---
 
-KronosDB has no backup or restore command. The supported backup is a copy of a node's data directory, taken from a volume snapshot or a file copy, and the supported restore is putting that directory on a fresh volume and starting the server on it. Two further mechanisms keep copies off the node while it runs: a passive-backup learner that replicates every context, and an upload of sealed segments to an object store. This guide covers all three and lists what each one does not cover.
+KronosDB has no backup or restore command. The supported backup is a copy of a node's data directory, taken from a volume snapshot or a file copy, and the supported restore is putting that directory on a fresh volume and starting the server on it. Two further mechanisms keep copies off the node while it runs: a passive-backup learner that replicates every context, and an archive that copies sealed segments to an object store. This guide covers all three and lists what each one does not cover.
 
 ## What a node stores
 
@@ -11,7 +11,7 @@ Each context is a subdirectory of the data directory (`--data-dir`, `/data` in t
 
 The server holds an exclusive lock on the data directory and refuses to start when another live process has it, so two nodes must never share a volume.
 
-The store does not delete events, so a data directory only grows. Watch `kronosdb_data_dir_bytes` per context and size the volume for it.
+The store does not delete events, so a data directory only grows, unless you [archive](#archive-sealed-segments-to-an-object-store) the log and cap the disk a node may use. Watch `kronosdb_data_dir_bytes` per context and size the volume for it.
 
 ## Copy the data directory
 
@@ -50,7 +50,7 @@ docker run --rm -v kronosdb-restored:/data -v "$PWD/backup":/backup \
 docker run -d --name kronosdb-restored \
   -p 50051:50051 -p 9240:9240 \
   -v kronosdb-restored:/data \
-  ghcr.io/kronosdb/kronosdb:0.11.0
+  ghcr.io/kronosdb/kronosdb:0.15.0
 ```
 
 On Kubernetes, create a volume from the snapshot and mount it as the pod's data volume. The restored node continues from the last position it had in the copy, so events appended after the copy was taken are not in it.
@@ -61,14 +61,14 @@ There is no point-in-time restore and no command that rewinds a log to an earlie
 
 A learner is a node that replicates every context from the leader and never votes, so it does not count toward the majority and a slow or lost learner does not delay writes. It keeps its own data directory, which you can snapshot like any other, and it needs no object store. Run it in another zone for a copy that survives the loss of the cluster's zone.
 
-With Helm, set the number of learners. They are the pods `kronosdb-learner-0` and up, with node ids from 101. The chart sets `KRONOSDB_CLUSTER_LEARNERS` on every pod, and each node tries once when it starts to add those learners to the cluster. Only the attempt made on the leader succeeds, and a failed attempt is not retried, so a learner that is not a member after the cluster has started is added with `POST /api/cluster/add-learner`.
+With Helm, set the number of learners. They are the pods `kronosdb-learner-0` and up, with node ids from 101. The chart sets `KRONOSDB_CLUSTER_LEARNERS` on every pod. Every node then keeps trying in the background to add those learners to the cluster, from startup and with a retry delay that grows from 250 ms to 5 s, until each learner is in the membership. Only the attempt on the leader can succeed, so it does not matter that the cluster has no leader yet when the nodes start. A node logs a warning when a learner is still not a member after a minute.
 
 ```yaml
 learners:
   replicas: 1
 ```
 
-Without Helm, start the learner with the node type `passive-backup`, an unused id and the voters as its peers, attach it to the voters' network (here the Compose project's `kronosdb_default`), and register it with the voters. The voters add learners named in `KRONOSDB_CLUSTER_LEARNERS` when they start, and `POST /api/cluster/add-learner` adds one to a running cluster.
+Without Helm, start the learner with the node type `passive-backup`, an unused id and the voters as its peers, and attach it to the voters' network (here the Compose project's `kronosdb_default`). Name it in `KRONOSDB_CLUSTER_LEARNERS` on the voters, for example `101=kronosdb-learner:50051`, and they add it to the membership as soon as they have a leader. To add a learner to a cluster that is already running without restarting the voters, send `POST /api/cluster/add-learner` instead.
 
 ```sh
 docker run -d --name kronosdb-learner \
@@ -78,35 +78,54 @@ docker run -d --name kronosdb-learner \
   -e KRONOSDB_CLUSTER_NODE_ID=101 \
   -e KRONOSDB_CLUSTER_PEERS=1=node1:50051,2=node2:50051,3=node3:50051 \
   -e KRONOSDB_ACCESS_TOKEN="$KRONOSDB_ACCESS_TOKEN" \
-  ghcr.io/kronosdb/kronosdb:0.11.0
+  ghcr.io/kronosdb/kronosdb:0.15.0
 ```
 
 A learner copies whatever the cluster contains, including a mistake, so it protects against losing nodes and not against bad writes.
 
-## Upload sealed segments to an object store
+## Archive sealed segments to an object store
 
-Setting a backup URL makes the leader upload the log to an object store as segments of it become final. A pass runs every `interval-secs`, and changing leader uploads nothing twice.
+Setting an archive URL makes the leader copy the log to an object store as segments of it become final. A pass runs every `interval-secs`, and changing leader copies nothing twice.
 
 ```toml
-[backup]
+[archive]
 url = "s3://toolstore-backups/kronosdb"
 interval-secs = 30
 ```
 
-The URL also takes `gs://` and `file://` forms, for example `file:///backups/kronosdb`. Credentials for a cloud store come from the provider's standard environment variables on the node. With Helm, `backup.url` and `backup.intervalSecs` set the two values, and `backup.credentialsSecret` names a secret whose keys become environment variables on the pods.
+The server refuses to start when a key in the file is not one it accepts, as [Configuration](/docs/kronosdb/configuration#sources-and-precedence) describes. The URL also takes `gs://`, `az://` and `file://` forms, for example `file:///backups/kronosdb`. Credentials for a cloud store come from the provider's standard environment variables on the node. With Helm, `archive.url` and `archive.intervalSecs` set the two values, and `archive.credentialsSecret` names a secret whose keys become environment variables on the pods.
 
-Each context gets a prefix under the URL, with its segment files under `<context>/segments/` and a `<context>/manifest.json` that lists them. A segment the manifest does not list is not part of the backup.
+Each context gets a prefix under the URL. Every object is written once and never replaced, so the bucket can have versioning or object lock turned on, which you should do. The store must support creating an object only if it does not exist yet. The leader checks that before it archives, and a store that cannot do it receives nothing. Give the bucket a lifecycle rule that aborts incomplete multipart uploads, because an upload cut short by a crash otherwise stays and is billed.
 
-The upload is write-only. The server has no command that reads the files back, and the upload does not include the segment being written or the `raft` directories, so it is not by itself a restorable copy of a node. Use it as an off-site copy of the sealed log, together with a copy of the data directory.
+The archive does not include the segment being written or the `raft` directories, and no command restores a node from it, so it is not by itself a restorable copy of a node. Use it as an off-site copy of the sealed log, together with a copy of the data directory or a learner. A node that joins a cluster after the leader has moved its oldest segments off its disk catches up on those segments from the archive.
+
+### Cap the disk a node uses
+
+By default every node keeps every segment on its disk. `max-local-bytes` is the most bytes a node keeps for its logs, segments and index files together. Past it, the node removes its oldest archived segments from the disk and reads them from the archive when a client or processor reads them.
+
+```toml
+[archive]
+url = "s3://toolstore-backups/kronosdb"
+max-local-bytes = 107374182400
+```
+
+Set it only when the disk cannot hold the whole log. A read of an archived segment takes about 100 ms, against about a millisecond from the local disk. The cap needs an archive URL and room for at least three segments, 256 MiB each by default, plus their index files. The server refuses to start with a cap of `0` or a cap and no URL, and logs a warning for a cap below three segments. With Helm, set `archive.maxLocalBytes`, which applies to voters only.
+
+- Learners keep every segment. Run at least one, because otherwise the events removed from every node exist only in the bucket.
+- While the archive cannot be reached, nothing is removed from a disk, and a capped node grows past the cap at the rate events arrive. Size the volume for the longest outage you need to ride out.
+- A small context whose reads must stay fast can lose its local segments first when they are the oldest. Size the cap so it stays local, or serve it from nodes without a cap.
+- On the console's Events page, a search with a filter skips archived events unless you choose Search the archive, because reading them downloads them.
+
+[Monitor a server](/docs/kronosdb/monitoring#set-alerts) lists the alerts for a stalled or lagging archive and for a node that cannot remove segments.
 
 ## Checking it works
 
 After a copy and restore, start the restored node and open its Contexts page. Each context is listed with the head position it had when the copy was taken. `curl http://localhost:9240/ready` prints `ready`, and a client reads the events up to that position.
 
-For the upload, the startup log has the line `segment backup enabled` with the URL and the interval. Once a context has sealed a segment, which at the default size is after 256 MiB, the object store holds `<context>/segments/` files and a `manifest.json`. To test it sooner, lower `--segment-size` on a test node.
+For the archive, the startup log has the line `archive enabled` with the URL and the interval. Once a context has sealed a segment, which at the default size is after 256 MiB, the object store holds objects under the context's prefix, and `kronosdb_archive_last_success_timestamp_seconds` on the leader shows the time of the last pass. To test it sooner, lower `--segment-size` on a test node.
 
 ## Related
 
-- [Configuration](/docs/kronosdb/configuration): the `[backup]` settings and `segment-size`.
+- [Configuration](/docs/kronosdb/configuration): the `[archive]` settings and `segment-size`.
 - [Run a cluster](/docs/kronosdb/clustering): voters, learners and membership.
 - [Monitor a server](/docs/kronosdb/monitoring): disk growth and the other signals to alert on.

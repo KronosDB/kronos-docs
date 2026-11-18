@@ -98,7 +98,7 @@ On a single node an append is acknowledged when its events are fsynced. In a clu
 
 Appends that arrive while another is being synced share one fsync. `group-commit-ms` adds a waiting window in milliseconds, 0 by default, which raises throughput at the price of latency.
 
-If an fsync fails, the server cannot make the written events durable, so it stops accepting appends. Pending and later appends fail with `internal` and a message that the event store is poisoned, until the server is restarted. The metric `kronosdb_engine_poisoned` reports the state, and [Monitor a server](/docs/kronosdb/monitoring#set-alerts) shows the alert.
+If a group commit fails, for example because an fsync fails or the commit thread panics, the server cannot make the written events durable, so it stops accepting appends. Pending and later appends fail with `internal` and a message that the event store is poisoned, until the server is restarted. The metric `kronosdb_engine_poisoned` reports the state, and [Monitor a server](/docs/kronosdb/monitoring#set-alerts) shows the alert.
 
 ## Snapshots and schedules
 
@@ -124,8 +124,8 @@ A schedule makes the server append an event at its due time. A client schedules 
 | `invalid_argument` | A record is malformed or not valid UTF-8, a type or tag key starts with `$`, or a snapshot is over the size limit. | Fix the request. Retrying does not help. |
 | `permission_denied` | The principal lacks the `read` role, for reads, or `write`, for appends, on the context. | Check the credentials and grants. |
 | `not_found` | The context does not exist. | Create the context or fix its name. |
-| `corrupted` | A stored record failed its checksum. This is never a false alarm. | Restore the node as described in [Back up and restore](/docs/kronosdb/backups). |
-| `internal` | An fsync failed and the event store is poisoned. | Check the volume, then restart the node. |
+| `corrupted` | A stored or replicated record failed an integrity check. This is never a false alarm. | Restore the node as described in [Back up and restore](/docs/kronosdb/backups). |
+| `internal` | A group commit failed, for example on an fsync error, and the event store is poisoned. | Check the volume, then restart the node. |
 
 ## Related
 
