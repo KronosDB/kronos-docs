@@ -15,7 +15,9 @@ The config file is TOML. `--config` (short form `-c`, environment variable `KRON
 Error: "config file '/etc/kronosdb/kronosdb.toml' has an unknown key `ack-mod` in table [storage] (line 7). Fix its spelling or move it to the table it belongs to, or remove it. Keys accepted there: `segment-size`, `read-path`, `block-cache-bytes`, `block-size`, `readahead-blocks`, `index-merge-rate`, `ack-mode`, `max-snapshot-size`."
 ```
 
-The [manifest](/docs/kronosdb/contexts#the-manifest) file is read differently and ignores keys it does not use.
+An unknown table fails the same way and names the table it would sit in, so a `[backup]` table at the top of the file fails with ``unknown table `[backup]` at the top level (line 3)``.
+
+The [manifest](/docs/kronosdb/contexts#the-manifest) refuses unknown keys too: one in the file at startup stops the server, and one in an edit while the server runs is logged and the previous manifest is kept.
 
 ```toml
 # kronosdb.toml
@@ -157,7 +159,7 @@ The admin port is configured separately from the client port. The default mode i
 | `[admin.oidc] role-claim` | `--oidc-role-claim` | `KRONOSDB_OIDC_ROLE_CLAIM` | unset | Dotted path to the roles claim, such as `realm_access.roles`. |
 | `[admin.oidc] required-role` | `--oidc-required-role` | `KRONOSDB_OIDC_REQUIRED_ROLE` | unset | Role a user must have. Unset lets any authenticated user of the realm in. |
 | `[admin.oidc] audience` | `--oidc-audience` | `KRONOSDB_OIDC_AUDIENCE` | unset | Expected `aud` of bearer tokens. Unset means it is not checked. |
-| `[admin.oidc] cookie-secret` | `--oidc-cookie-secret` | `KRONOSDB_OIDC_COOKIE_SECRET` | random per start | Key that signs session cookies. Set it so sessions survive restarts and work across replicas. |
+| `[admin.oidc] cookie-secret` | `--oidc-cookie-secret` | `KRONOSDB_OIDC_COOKIE_SECRET` | none | Key that signs console session cookies. When it is not set, `token` mode derives the key from the admin token and `oidc` mode generates one at each start, so OIDC sessions then end on restart and are not valid on another replica. |
 | `[admin.oidc] session-ttl-minutes` | none | none | `480` | Lifetime of a console session. |
 
 ## Archive

@@ -14,7 +14,7 @@ docker run -d --name kronosdb \
   -p 50051:50051 -p 9240:9240 \
   -v kronosdb-data:/data \
   -e KRONOSDB_DEV=1 \
-  ghcr.io/kronosdb/kronosdb:0.15.0
+  ghcr.io/kronosdb/kronosdb:0.16.0
 ```
 
 The image runs `kronosdb-server` as the unprivileged user `kronosdb` and listens on `0.0.0.0:50051` for clients and peers and on `0.0.0.0:9240` for the admin console, probes and metrics. Everything it stores is under `/data`, which is declared as a volume. Keep the version tag for anything you keep, so that an upgrade is a change you make.

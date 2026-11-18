@@ -151,7 +151,7 @@ With TLS on, each node presents its own `tls-cert` and `tls-key` to its peers an
 
 The admin port has three modes, set with `[admin.auth] mode`, `--admin-auth-mode` or `KRONOSDB_ADMIN_AUTH_MODE`.
 
-In `token` mode, a browser shows a sign-in form where you enter the token, or you open a URL ending in `?access_token=<token>` once to start a session. Scripts send `Authorization: Bearer <token>`. The server fails to start in this mode without a token.
+In `token` mode, a browser shows a sign-in form where you enter the token, or you open a URL ending in `?access_token=<token>` once to start a session. Scripts send `Authorization: Bearer <token>`. The server fails to start in this mode without a token. Sessions are signed with a key derived from the token, so a session survives a restart and is valid on every node that has the same token. Changing the token ends every session signed with the old one.
 
 ```sh
 curl -H "Authorization: Bearer $KRONOSDB_ADMIN_TOKEN" http://localhost:9240/api/v1/node

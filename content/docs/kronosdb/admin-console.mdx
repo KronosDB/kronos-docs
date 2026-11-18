@@ -51,7 +51,7 @@ A read-only view of the node's effective configuration in five groups: server (n
 
 The `[admin.auth] mode` setting chooses one of three behaviors. In `none`, which is the default, every endpoint is open. In `token`, a request needs the configured token, as `Authorization: Bearer <token>`, or a session. A browser reaches a sign-in form at `/auth/login`, or can start a session by opening any page with `?access_token=<token>`. In `oidc`, a browser is redirected to the identity provider and returns to `/auth/callback`, and API callers send a JWT from that provider as a bearer token.
 
-A console session lasts 480 minutes unless `session-ttl-minutes` sets another value. In `token` and `oidc` mode a bearer credential for the client port that resolves to a cluster-wide `admin` role is also accepted. The probes and the metrics need no credentials in any mode. The settings are listed under [Admin in the configuration reference](/docs/kronosdb/configuration#admin).
+A console session lasts 480 minutes unless `session-ttl-minutes` sets another value. In `token` mode, a session survives a restart and works on every node with the same token; in `oidc` mode it does when `cookie-secret` is set. In `token` and `oidc` mode a bearer credential for the client port that resolves to a cluster-wide `admin` role is also accepted. The probes and the metrics need no credentials in any mode. The settings are listed under [Admin in the configuration reference](/docs/kronosdb/configuration#admin).
 
 ## API
 

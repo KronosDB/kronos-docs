@@ -14,7 +14,7 @@ Each node needs its own id, a name, a data volume and the same peer list. The pe
 ```yaml
 # compose.yaml
 x-node: &node
-  image: ghcr.io/kronosdb/kronosdb:0.15.0
+  image: ghcr.io/kronosdb/kronosdb:0.16.0
   restart: unless-stopped
   stop_grace_period: 30s
   healthcheck:
@@ -119,7 +119,7 @@ alerts:
 
 ```sh
 helm install kronosdb oci://ghcr.io/kronosdb/charts/kronosdb \
-  --version 0.15.0 -f values.yaml
+  --version 0.16.0 -f values.yaml
 ```
 
 With the release named `kronosdb`, the pods are `kronosdb-0`, `kronosdb-1` and `kronosdb-2` with node ids 1, 2 and 3, and the services are `kronosdb` (clients on 50051) and `kronosdb-admin` (port 9240). The chart fails to render with admin token mode and no admin token, and prints a warning after install when the client port has no token, the admin port has no authentication, or `learners.replicas` is 0, which means there is no [passive-backup learner](/docs/kronosdb/backups#keep-a-passive-backup-learner).

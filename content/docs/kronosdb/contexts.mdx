@@ -33,7 +33,7 @@ The server looks for the manifest in this order, and uses the first one it finds
 3. The `manifest` key in the TOML configuration file, for example `manifest = "/etc/kronosdb/manifest.toml"`.
 4. A file named `kronosdb-manifest.toml` in the server's working directory.
 
-At startup the server creates the declared contexts that are missing before it starts serving. While it runs, it reads the file every 10 seconds, so a file replaced by a symlink swap, as a Kubernetes ConfigMap update does, is noticed. A context added to the file is created within one interval and served as soon as it exists, without a restart. A file that does not parse is logged as a warning and the server keeps the contexts it has.
+At startup the server creates the declared contexts that are missing before it starts serving. While it runs, it reads the file every 10 seconds, so a file replaced by a symlink swap, as a Kubernetes ConfigMap update does, is noticed. A context added to the file is created within one interval and served as soon as it exists, without a restart. The manifest accepts only the `contexts` list and the `name` of each entry. At startup, a manifest that does not parse or has an unknown key, such as `[[context]]` for `[[contexts]]`, stops the server with the file, the line and the key: ``unknown field `context`, expected `contexts` ``. While the server runs, an edit like that is logged as a warning and the server keeps the manifest it had.
 
 Applying a manifest only adds. A context that is already there is left untouched, so applying the same manifest again changes nothing. When a context disappears from the file, the server logs that the manifest does not declare it any more, and the context keeps serving without being deleted.
 
