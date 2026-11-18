@@ -18,7 +18,7 @@ export const GetCustomerRentals = ns.query("GetCustomerRentals", {
 })
 ```
 
-The payload schema is applied by `validatingHandler`, which you wrap around a handler, as described in [Interception and validation](/docs/kronos-ts/interception-and-validation). Without it the payload reaches the handler as the caller sent it. The result schema is not checked at run time, so a handler that returns something else is not detected by the bus. A handler that must guarantee its result parses it with the result schema itself.
+The payload schema is applied by `validatingHandler`, which you wrap around a handler, as described in [Interception and validation](/docs/kronos-ts/interception-and-validation). Without it the payload reaches the handler as the caller sent it. `validatingHandler` also parses the handler's return value against the result schema, and the caller receives the parsed value. A return value that does not match fails inside the handler with a `validate: "<name>" result failed validation` error. Without the wrapper the caller receives the value exactly as the handler returned it.
 
 ## Query handlers
 
@@ -133,6 +133,7 @@ Each subscription buffers 256 updates. When a consumer falls behind and the buff
 - `UnavailableError` (`isUnavailable`): a remote bus could not serve the query now, because the connection is down, a limit was reached or the deadline passed. Every remote bus has a `timeoutMs` option, 30 seconds by default. The local bus has no deadline, so a handler that never settles leaves the caller waiting.
 - An error the handler throws rejects the `query` call. Over a remote bus it arrives with its name and message, and the kinds `conflict` and `unavailable` are kept. Use the guards `isNoHandler` and `isUnavailable` instead of `instanceof`.
 - A payload that fails its schema under `validatingHandler` rejects the query with an `Error` that names the query and the schema's messages.
+- A return value that fails the result schema under `validatingHandler` rejects the query with a `validate: "<name>" result failed validation` error.
 - A subscription that overflows its buffer, or whose initial query fails, ends its `updates` iteration with an error.
 
 ## Related

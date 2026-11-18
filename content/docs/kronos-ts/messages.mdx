@@ -78,7 +78,7 @@ Whether a descriptor may declare a `result` depends on its kind:
 | Event | Not accepted | An event is a stored fact and has no caller to return a result to. |
 | Query | Required | `query` and `ctx.query` return its output type. |
 
-The result schema is a type for the compiler. Kronos does not parse a handler's return value against it at runtime. [Commands](/docs/kronos-ts/commands#results) describes how a command result reaches the caller.
+The result schema types the value the caller receives. A handler wrapped in `validatingHandler` also has its return value parsed against it, so the caller receives the parsed value and a mismatching return value fails. A command without a `result` is not checked. [Commands](/docs/kronos-ts/commands#results) describes how a command result reaches the caller.
 
 ## Tags
 

@@ -73,7 +73,7 @@ A handler that returns a refusal has appended nothing, so no write happens. Lite
 
 A thrown error is for what the caller can only retry or report: a bug, a broken invariant, or infrastructure failing. The error rejects the caller's `send` with the same error object, and no events are written. [Interception and validation](/docs/kronos-ts/interception-and-validation) covers turning thrown errors into responses at the edge.
 
-The result reaches the caller as the resolved value of `send`, whether the handler ran in the same process or on another instance. Across a transport it is serialized, so it has to be data that survives serialization. Kronos does not check a returned value against the `result` schema at runtime.
+The result reaches the caller as the resolved value of `send`, whether the handler ran in the same process or on another instance. Across a transport it is serialized, so it has to be data that survives serialization. A handler wrapped in `validatingHandler` has its returned value parsed against the `result` schema. A return value that does not match fails inside the handler's unit of work, so the events the handler appended are not written. A command without a `result` is not checked.
 
 ## Dispatching
 
@@ -192,7 +192,7 @@ Test with the guard and not with `instanceof`. Each store package pins the core 
 Other failures:
 
 - A handler throws an error without a kind. It is a bug, a misconfiguration or something for an operator. `send` rejects with that error, nothing is written, and retrying does not help.
-- With `validatingHandler` in the chain, a payload that fails its schema rejects the command with a `validate: "<name>" failed validation` error before the handler runs, and the same applies to each event a handler appends.
+- With `validatingHandler` in the chain, a payload that fails its schema rejects the command with a `validate: "<name>" failed validation` error before the handler runs, and the same applies to each event a handler appends. A return value that fails the `result` schema rejects the command with a `validate: "<name>" result failed validation` error, and the handler's appended events are not written.
 
 ## Related
 

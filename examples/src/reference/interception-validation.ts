@@ -4,6 +4,8 @@ import {
   kronos,
   localCommandBus,
   localQueryBus,
+  query,
+  queryHandler,
   send,
   unitOfWork,
   validate,
@@ -66,3 +68,33 @@ try {
 }
 
 await app.stop()
+
+// A query's answer is checked against its result schema
+export const GetCustomer = ns.query("GetCustomer", {
+  payload: z.object({ customerId: z.string() }),
+  result: z.object({ customerId: z.string(), maxRentals: z.number().int() }),
+})
+
+const customerRows = new Map<string, Record<string, unknown>>([
+  ["ada", { customerId: "ada", maxRentals: 2, internalNote: "verified" }],
+  ["linus", { customerId: "linus", maxRentals: "2" }],
+])
+
+export const getCustomer = queryHandler(GetCustomer, ({ payload }) =>
+  customerRows.get(payload.customerId) as { customerId: string; maxRentals: number },
+)
+
+const queryBus = localQueryBus(unitOfWork)
+const queries = kronos({
+  queryHandlers: [{ ...getCustomer, handler: validatingHandler(getCustomer.handler, getCustomer.descriptor), queryBus }],
+})
+
+console.log(JSON.stringify(await query(queryBus, GetCustomer, { customerId: "ada" })))
+
+try {
+  await query(queryBus, GetCustomer, { customerId: "linus" })
+} catch (error) {
+  console.log((error as Error).message)
+}
+
+await queries.stop()

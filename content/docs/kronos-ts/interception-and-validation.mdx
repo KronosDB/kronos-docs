@@ -3,7 +3,7 @@ title: Interception and validation
 description: How to change or reject messages sent on a bus, wrap handlers with your own behaviour, and check payloads against their schemas.
 ---
 
-Interception, handler wrappers and validation are the three places where your code runs between a message and a handler. An intercept is a function on a bus that receives every command or query sent through it, before the bus routes it. A handler wrapper is a function that takes a handler and returns another one, so it can run code around the handler. Validation checks a payload against the schema of the descriptor for that message, using `validate` or the handler wrapper `validatingHandler`.
+Interception, handler wrappers and validation are the three places where your code runs between a message and a handler. An intercept is a function on a bus that receives every command or query sent through it, before the bus routes it. A handler wrapper is a function that takes a handler and returns another one, so it can run code around the handler. Validation checks a payload against the schema of the descriptor for that message, and a handler's return value against the descriptor's result schema, using `validate` or the handler wrapper `validatingHandler`.
 
 All three are plain functions that you compose where you assemble the app, as shown on the [Assembly](/docs/kronos-ts/assembly) page. Correlation and logging are built from the same pieces and are documented in [Observability](/docs/kronos-ts/observability).
 
@@ -128,6 +128,8 @@ The text after the dash is whatever the schema library reported. `validate` retu
 
 `validatingHandler(next, descriptor)` wraps a handler so that its payloads are validated. It validates the payload of the message the handler receives, and the handler receives the parsed payload. It also validates the payload of every message the handler creates with `ctx.append`, `ctx.send`, `ctx.query`, `ctx.schedule` and `ctx.scheduleAfter`, and the created message carries the parsed value. One wrapper serves command, query and event handlers.
 
+For a command or query handler, the wrapper also parses the value the handler returns against the descriptor's `result` schema, and the caller receives the parsed value. A command without a `result` is not checked. Updates sent with `ctx.emitUpdate` are not checked against the query's result.
+
 ```ts
 export const registerCustomer = commandHandler(RegisterCustomer, async ({ payload }, ctx) => {
   ctx.append(CustomerRegistered, { ...payload, maxRentals: payload.maxRentals - 2 })
@@ -169,10 +171,35 @@ validate: "toolstore.RegisterCustomer" failed validation — Invalid input: expe
 
 A failure on a message the handler created has the same shape and names the descriptor of that message, not the command. For an event handler, the error fails the processor's batch and is retried or dead-lettered as described in [Event processors](/docs/kronos-ts/event-processors).
 
+A handler whose return value does not match its result schema fails with `validate: "<qualified name>" result failed validation — <issues>`. The check runs inside the handler's unit of work, so a command that appended events and then returned a mismatching value writes none of them. In this query handler, the stored rows are loosely typed:
+
+```ts
+export const getCustomer = queryHandler(GetCustomer, ({ payload }) =>
+  customerRows.get(payload.customerId) as { customerId: string; maxRentals: number },
+)
+```
+
+The row for `ada` has an extra `internalNote` key, which the result schema drops, and the row for `linus` holds `maxRentals` as a string:
+
+```ts
+console.log(JSON.stringify(await query(queryBus, GetCustomer, { customerId: "ada" })))
+
+try {
+  await query(queryBus, GetCustomer, { customerId: "linus" })
+} catch (error) {
+  console.log((error as Error).message)
+}
+```
+
+```text title="Output"
+{"customerId":"ada","maxRentals":2}
+validate: "toolstore.GetCustomer" result failed validation — Invalid input: expected number, received string
+```
+
 ## Errors
 
 - An intercept that throws rejects the send with that error. No handler is called.
-- A failed validation throws the error shown above, from `validate` where you call it and from `validatingHandler` inside the handler.
+- A failed validation throws the errors shown above, from `validate` where you call it and from `validatingHandler` inside the handler. A mismatching return value fails with the `result failed validation` variant.
 - A wrapper chain that cannot work is rejected when `kronos()` boots, as [Assembly](/docs/kronos-ts/assembly#boot-errors) shows.
 
 ## Related
