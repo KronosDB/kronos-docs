@@ -207,30 +207,86 @@ export function IndexingAnimation() {
   )
 }
 
-// ── 4. Merging: eight key tables become one ────────────────────────────────
+// ── 4. Merging: eight key tables become one, and eight of those become one ──
 
 export function MergeAnimation() {
-  // phases: 0 eight tables · 1 they move together · 2 one table
-  const segW = 64
-  const gap = 10
-  const x = (index: number) => 24 + index * (segW + gap)
-  const mergedW = x(7) + segW - x(0)
+  // phases: 0 seven level-1 tables and eight segment key tables · 1 the eight merge into the eighth level-1 table
+  //         · 2 eight level-1 tables · 3 they merge into one level-2 table · 4 hold
+  const left = 24
+  const cell = 9.25
+  const group = cell * 8
+  const segX = (segment: number) => left + segment * cell
+  const groupX = (index: number) => left + index * group
+  const rowSegments = 44
+  const rowKeys = 74
+  const rowLevel1 = 104
+  const rowLevel2 = 150
   return (
-    <Animation label="The key tables of eight committed segments are merged into one table." phases={3} ms={1500} viewBox="0 0 640 170">
+    <Animation label="Eight segments' key tables merge into one level-1 table, and eight level-1 tables merge into one level-2 table covering 64 segments." phases={5} ms={1500} viewBox="0 0 640 200">
       {(phase) => (
         <>
-          {Array.from({ length: 8 }, (_, index) => (
-            <g key={index} style={{ transform: `translate(${x(index)}px, 30px)` }}>
-              <Box w={segW} h={40} label={`S${index}`} />
-            </g>
+          <Label x={left} y={24} size={12} muted>
+            64 committed segments
+          </Label>
+          {Array.from({ length: 64 }, (_, segment) => (
+            <rect
+              key={segment}
+              x={segX(segment) + 1}
+              y={rowSegments - 12}
+              width={cell - 2}
+              height={18}
+              rx={2}
+              style={{ fill: "var(--color-fd-muted)", stroke: "var(--color-fd-border)" }}
+            />
           ))}
+
+          {/* the last group's own key tables */}
           {Array.from({ length: 8 }, (_, index) => (
-            <At key={index} x={phase === 1 ? x(0) + (mergedW - segW) / 2 : x(index)} y={phase === 1 ? 112 : 84} show={phase < 2}>
-              <Box w={segW} h={30} label=".keys" tone="accent" mono />
+            <At key={index} x={phase === 0 ? segX(56 + index) + 1 : groupX(7) + 4} y={phase === 0 ? rowKeys - 10 : rowLevel1 - 10} show={phase === 0}>
+              <rect width={cell - 2} height={20} rx={2} style={{ fill: accent(30), stroke: "var(--color-fd-primary)" }} />
             </At>
           ))}
-          <At x={x(0)} y={112} show={phase === 2}>
-            <Box w={mergedW} h={30} label="one key table for S0 to S7" tone="accent" />
+          <At x={segX(56)} y={rowKeys + 22} show={phase === 0}>
+            <Label size={10.5} muted>
+              .keys of S56–S63
+            </Label>
+          </At>
+
+          {/* level-1 tables, one per group of eight segments */}
+          {Array.from({ length: 8 }, (_, index) => {
+            const built = index < 7 || phase >= 1
+            const merging = phase >= 3
+            return (
+              <At
+                key={index}
+                x={merging ? groupX(0) + (group * 8 - group) / 2 : groupX(index) + 2}
+                y={merging ? rowLevel2 - 10 : rowLevel1 - 10}
+                show={built && phase < 4}
+              >
+                <rect width={group - 4} height={20} rx={4} style={{ fill: accent(index === 7 && phase <= 2 ? 40 : 24), stroke: "var(--color-fd-primary)" }} />
+                <Label x={(group - 4) / 2} y={14} size={10} anchor="middle" mono>
+                  L1
+                </Label>
+              </At>
+            )
+          })}
+          <At x={left} y={rowLevel1 + 30} show={phase >= 1 && phase < 3}>
+            <Label size={10.5} muted>
+              level 1: 8 segments each
+            </Label>
+          </At>
+
+          {/* the level-2 table */}
+          <At x={left + 2} y={rowLevel2 - 10} show={phase >= 4}>
+            <rect width={group * 8 - 4} height={20} rx={4} style={{ fill: accent(40), stroke: "var(--color-fd-primary)" }} strokeWidth={1.5} />
+            <Label x={(group * 8 - 4) / 2} y={14} size={10.5} anchor="middle" weight={600}>
+              level 2: one key table for S0–S63
+            </Label>
+          </At>
+          <At x={left} y={190} show={phase >= 4}>
+            <Label size={11} muted>
+              Eight level-2 tables merge into a level-3 table for 512 segments, and so on.
+            </Label>
           </At>
         </>
       )}

@@ -52,11 +52,13 @@ Both files are written under a temporary name, synced, and then moved to their f
 
 ## Merging key tables
 
-A long log has many segments, and a query that consulted every segment's key table would open thousands of files. In the background, the server merges the key tables of eight consecutive segments into one table, then eight of those tables into one, and so on. A query over a long log reads a few large tables.
+A long log has many segments, and a query that consulted every segment's key table would open thousands of files. In the background, the server merges key tables in levels. A level-1 table covers 8 segments and is built from their key tables. A level-2 table covers 64 segments and is built from the eight level-1 tables under it, a level-3 table covers 512 segments, and so on. When a higher table is in use, the tables it covers are deleted, so a query over a long log reads a few large tables. With the default segment size, a level-1 table covers 2 GiB of log, a level-2 table 16 GiB and a level-3 table 128 GiB.
 
 <MergeAnimation />
 
 A merged table has the same format as a segment's key table, over a longer range of positions, and a merge is a k-way merge of tables in hash order. Its position sets are counted from the table's base, so a table covers at most 2³²−1 positions; a block that would cover more is left as its eight parts.
+
+Each table covers an aligned block of segments: a level-1 table starts at a multiple of 8, a level-2 table at a multiple of 64. The server picks the largest blocks that the committed segments fill, so the tables depend only on how many segments are committed, and every node has the same ones. With 75 committed segments, one level-2 table covers segments 0 to 63, one level-1 table covers 64 to 71, and segments 72 to 74 keep their own key tables.
 
 Only segments whose events are all committed are merged: sealed, with their key table on disk, and below the watermark. A merge writes the new table, then rewrites a manifest in the `index` directory that names the tables in use. The new table is in use from the moment the manifest names it. Queries that started earlier finish on the tables they opened, and the old key tables are then deleted. If the server stops during a merge, it uses the tables the manifest names and removes the rest. Segment files and locators are not changed by a merge.
 
