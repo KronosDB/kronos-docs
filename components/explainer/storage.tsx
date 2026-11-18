@@ -300,3 +300,225 @@ function PositionRow({ y, name, values, phase }: { y: number; name: string; valu
     </g>
   )
 }
+
+// ── 6. A position set: the high 16 bits choose a container, the low 16 bits go in it ──
+
+export function PositionSetAnimation() {
+  // phases: 0 a position · 1 split into high and low bits · 2 stored in its container · 3 a full container becomes a bitmap
+  const containerX = (index: number) => 290 + index * 116
+  return (
+    <Animation label="A position is split into its high 16 bits, which choose a container, and its low 16 bits, which are stored in that container. A container with more than 4096 values is stored as a bitmap." phases={4} ms={1700} viewBox="0 0 640 200">
+      {(phase) => (
+        <>
+          <At x={24} y={30}>
+            <Label size={12} muted>
+              position (relative to the table base)
+            </Label>
+            <Label y={34} size={26} mono weight={700}>
+              70 000
+            </Label>
+          </At>
+          <At x={24} y={96} show={phase >= 1}>
+            <Label size={12} muted>
+              high 16 bits · low 16 bits
+            </Label>
+            <Label y={30} size={20} mono weight={700}>
+              1 · 4 464
+            </Label>
+          </At>
+
+          {[0, 1, 2].map((key) => {
+            const bitmap = key === 1 && phase === 3
+            return (
+              <At key={key} x={containerX(key)} y={40}>
+                <Box
+                  w={108}
+                  h={120}
+                  tone={key === 1 && phase >= 2 ? "accent" : "plain"}
+                  label={`container ${key}`}
+                  sub={bitmap ? "bitmap · 4 097" : key === 1 ? (phase >= 2 ? "array · 4 096" : "array · 4 095") : key === 0 ? "array · 312" : "array · 9"}
+                  align="top"
+                />
+                <g className="kx-move" style={{ opacity: bitmap ? 0 : 1 }}>
+                  {[0, 1, 2, 3].map((row) => (
+                    <rect key={row} x={14} y={54 + row * 14} width={68} height={9} rx={2} style={{ fill: "var(--color-fd-muted)" }} />
+                  ))}
+                </g>
+                <g className="kx-move" style={{ opacity: bitmap ? 1 : 0 }}>
+                  {Array.from({ length: 48 }, (_, cell) => (
+                    <rect
+                      key={cell}
+                      x={14 + (cell % 8) * 8.6}
+                      y={54 + Math.floor(cell / 8) * 9}
+                      width={7}
+                      height={7}
+                      style={{ fill: cell % 3 === 0 || cell % 7 === 0 ? "var(--color-fd-primary)" : "var(--color-fd-muted)" }}
+                    />
+                  ))}
+                </g>
+              </At>
+            )
+          })}
+
+          <At x={phase >= 2 ? containerX(1) + 28 : 24} y={phase >= 2 ? 98 : 146} show={phase >= 1 && phase < 3}>
+            <rect width={52} height={22} rx={11} style={{ fill: "var(--color-fd-primary)" }} />
+            <text x={26} y={15.5} textAnchor="middle" style={{ fill: "var(--color-fd-primary-foreground)", fontSize: 12, fontWeight: 700 }}>
+              4 464
+            </text>
+          </At>
+          <At x={300} y={186} show={phase === 3}>
+            <Label size={11.5} muted>
+              one more value: past 4096, the container becomes an 8 KiB bitmap
+            </Label>
+          </At>
+        </>
+      )}
+    </Animation>
+  )
+}
+
+// ── 7. Finding a key: interpolate over the sorted hashes ─────────────────────
+
+export function KeyLookupAnimation() {
+  // phases: 0 the key · 1 its hash · 2 first probe, by interpolation · 3 second probe finds it · 4 its positions
+  const top = 24
+  const height = 160
+  const at = (fraction: number) => top + fraction * height
+  return (
+    <Animation label="A key's hash places it in the directory, which is sorted by hash, so a lookup finds the key in a few probes and then reads its position set." phases={5} ms={1400} viewBox="0 0 640 210">
+      {(phase) => (
+        <>
+          <At x={24} y={40}>
+            <Label size={12} muted>
+              key
+            </Label>
+            <Label y={24} size={15} mono weight={600}>
+              toolId=t-1
+            </Label>
+          </At>
+          <At x={24} y={104} show={phase >= 1}>
+            <Label size={12} muted>
+              hash
+            </Label>
+            <Label y={24} size={15} mono weight={600}>
+              0xe252…
+            </Label>
+            <Label y={44} size={11.5} muted>
+              88% of the way from 0x0000… to 0xffff…
+            </Label>
+          </At>
+
+          <At x={300} y={0}>
+            <rect y={top} width={110} height={height} rx={6} style={{ fill: "var(--color-fd-muted)", stroke: "var(--color-fd-border)" }} />
+            <Label x={55} y={top - 8} size={11.5} anchor="middle" muted>
+              directory · 1 000 keys
+            </Label>
+            <Label x={-8} y={top + 10} size={10} anchor="end" mono muted>
+              0x0000…
+            </Label>
+            <Label x={-8} y={top + height} size={10} anchor="end" mono muted>
+              0xffff…
+            </Label>
+            {phase >= 2 && (
+              <g>
+                <line x1={0} x2={110} y1={at(0.884)} y2={at(0.884)} style={{ stroke: phase === 2 ? "var(--color-fd-primary)" : "var(--color-fd-muted-foreground)" }} strokeWidth={2} />
+                <Label x={118} y={at(0.884) - 4} size={11} mono>
+                  probe 1: entry 884, lower
+                </Label>
+              </g>
+            )}
+            {phase >= 3 && (
+              <g>
+                <line x1={0} x2={110} y1={at(0.9)} y2={at(0.9)} style={{ stroke: "var(--color-fd-primary)" }} strokeWidth={3} />
+                <Label x={118} y={at(0.9) + 14} size={11} mono weight={600}>
+                  probe 2: entry 886, found
+                </Label>
+              </g>
+            )}
+          </At>
+
+          <At x={440} y={30} show={phase >= 4}>
+            <Box w={176} h={52} label="positions of toolId=t-1" sub="read in place" tone="accent" />
+          </At>
+          <Arrow x1={410} y1={at(0.9)} x2={520} y2={86} show={phase >= 4} tone="accent" />
+        </>
+      )}
+    </Animation>
+  )
+}
+
+// ── 8. The leapfrog: the first match at or after a position ─────────────────
+
+const leapTag = [0, 4, 9, 30, 33]
+const leapType = [1, 4, 11, 30, 40]
+
+export function LeapfrogAnimation() {
+  // phases: 0 cursor at 5 · 1 each set's first member ≥ 5 · 2 cursor to 11 · 3 first members ≥ 11 · 4 they agree: 30
+  const x = (position: number) => 170 + position * 11
+  const cursor = (phase: number) => (phase <= 1 ? 5 : 11)
+  return (
+    <Animation label="To find the first match at or after a position, the server looks up each set's first member at or after a cursor and moves the cursor to the highest of them until all the sets return the same position." phases={5} ms={1500} viewBox="0 0 640 190">
+      {(phase) => {
+        const tagHit = phase === 0 ? null : phase <= 2 ? 9 : 30
+        const typeHit = phase === 0 ? null : phase <= 2 ? 11 : 30
+        const done = phase === 4
+        return (
+          <>
+            <LeapRow y={46} name="toolId=t-1" values={leapTag} hit={tagHit} done={done} x={x} />
+            <LeapRow y={106} name="type ToolRented" values={leapType} hit={typeHit} done={done} x={x} />
+            <At x={x(cursor(phase)) - 1} y={24}>
+              <line y1={0} y2={120} style={{ stroke: "var(--color-fd-primary)" }} strokeWidth={2} strokeDasharray="4 3" />
+              <Label x={4} y={4} size={11.5} mono weight={600}>
+                {`cursor ${cursor(phase)}`}
+              </Label>
+            </At>
+            <At x={24} y={176}>
+              <Label size={12} muted={!done} weight={done ? 600 : undefined}>
+                {phase === 0
+                  ? "first match at or after 5?"
+                  : phase === 1
+                    ? "toolId=t-1 → 9, ToolRented → 11: they differ, move to 11"
+                    : phase === 2
+                      ? "the cursor moves to the highest position returned, 11"
+                      : phase === 3
+                        ? "toolId=t-1 → 30, ToolRented → 30"
+                        : "both return 30: the first match at or after 5 is 30"}
+              </Label>
+            </At>
+          </>
+        )
+      }}
+    </Animation>
+  )
+}
+
+function LeapRow({ y, name, values, hit, done, x }: { y: number; name: string; values: number[]; hit: number | null; done: boolean; x: (position: number) => number }) {
+  return (
+    <g style={{ transform: `translate(0px, ${y}px)` }}>
+      <line x1={x(0) - 14} x2={x(42)} y1={14} y2={14} style={{ stroke: "var(--color-fd-border)" }} />
+      <Label x={24} y={18} size={11.5} mono muted>
+        {name}
+      </Label>
+      {values.map((value) => {
+        const lit = value === hit
+        return (
+          <g key={value} style={{ transform: `translate(${x(value) - 13}px, 0px)` }}>
+            <rect
+              width={26}
+              height={28}
+              rx={14}
+              className="kx-tone"
+              style={{
+                fill: lit ? (done ? "color-mix(in oklab, var(--color-fd-success) 35%, var(--color-fd-card))" : accent(45)) : "var(--color-fd-muted)",
+                stroke: lit ? (done ? "var(--color-fd-success)" : "var(--color-fd-primary)") : "var(--color-fd-border)",
+              }}
+            />
+            <Label x={13} y={18.5} size={11.5} anchor="middle" mono>
+              {value}
+            </Label>
+          </g>
+        )
+      })}
+    </g>
+  )
+}

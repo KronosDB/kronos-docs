@@ -11,13 +11,21 @@ A query is a list of criteria, each naming event types, tags or both. For each c
 
 <QueryAnimation />
 
+The tag sets are intersected starting with the smallest, because the result can never be larger than it. A long range is read in windows of at most 2²⁰ positions, and each window reads only the containers of each [position set](/docs/kronosdb/indexes#position-sets) that fall inside it, so a query over a large table costs about as much as the part of the table it covers.
+
 Each matching position is then turned into a byte offset by its segment's locator, and the record is read from the segment file, which the server maps into memory. A record whose checksum does not match fails the read with an error instead of being returned.
 
 The server sends the records to the client in `Events` messages of up to 1024 events or 1 MiB each. The last message carries the head position at the time of the request, the consistency marker that the client passes in the condition of its next append.
 
 ## Append conditions
 
-An append condition requires that no event matching its criteria exists at or after the marker. The server checks this with the same indexes, without reading any event: the key tables for the sealed part of that range and the in-memory index for the active segment. When a matching event exists, nothing is written and the client receives its position. If that event is not yet committed, the rejection waits until it is, so a client is never refused because of an event that could still be lost.
+An append condition requires that no event matching its criteria exists at or after the marker. The server checks this with the same indexes, without reading any event: the key tables for the sealed part of that range and the in-memory index for the active segment.
+
+Checking a condition needs only the first match at or after the marker, which the server finds with a leapfrog. With a cursor that starts at the marker, it looks up each tag's first position at or after the cursor, and the lowest such position among the named types. If these are all the same position, that position matches. Otherwise the cursor moves to the highest of them, because no position below it is in every set, and the lookups repeat. Each lookup reads one container of a set, so the work follows the positions past the marker, which for a recent marker are usually none, and not the size of the sets.
+
+<LeapfrogAnimation />
+
+When a matching event exists, nothing is written and the client receives its position. If that event is not yet committed, the rejection waits until it is, so a client is never refused because of an event that could still be lost.
 
 ## Related
 

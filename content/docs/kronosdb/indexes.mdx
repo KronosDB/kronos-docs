@@ -1,32 +1,62 @@
 ---
 title: Indexes
-description: "How KronosDB indexes events by type and tag, the index files beside each sealed segment, and how key tables are merged."
+description: "How KronosDB indexes events by type and tag: keys, roaring position sets, key tables and their directory, and merging."
 ---
 
-KronosDB finds events by type and tag through indexes, without reading the events themselves. This page describes what is indexed, where the indexes are kept, and how they stay small to search as the log grows.
+KronosDB finds events by type and tag through indexes, without reading the events themselves. This page describes what is indexed, how a set of positions is stored, how a key is found in a key table, and how the tables stay few as the log grows.
 
-## What is indexed
+## Keys
 
-Every event is indexed under one key for its type and one key for each of its tags, so `ToolRented` with the tags `toolId=t-1` and `customerId=ada` is indexed under three keys. For each key, the index holds the set of positions of the events that have it, stored as compressed bitmaps.
+Every event is indexed under one key for its type and one key for each of its tags, so `ToolRented` with the tags `toolId=t-1` and `customerId=ada` is indexed under three keys. For each key, the index holds the set of positions of the events that have it.
 
 <IndexingAnimation />
 
-The active segment's index is kept in memory, together with the byte offset of each event in the file. It is updated as each record is written and is not saved to disk. When the server starts, it rebuilds the active segment's index by reading the segment.
+A key is stored as bytes: the length of the tag's key as a 4-byte little-endian number, then the tag's key, then its value. An event type is indexed as a tag with the reserved key `__kronosdb_event_type__` and the type name as its value. Because the key's length comes first, `toolId=t-1` and `toolI=dt-1` are different keys even though their characters run together the same way.
+
+The active segment's index is kept in memory: a hash map from each key to its set of positions, and a list of the byte offset of each event in the file. It is updated as each record is written and is not saved to disk. When the server starts, it rebuilds the active segment's index by reading the segment.
+
+## Position sets
+
+A set of positions is stored as a roaring bitmap. Positions in a set are counted from the base position of the segment or table that holds it, so each fits in 32 bits. The high 16 bits of a position choose a container and the low 16 bits are stored in it. A container that holds at most 4096 values is a sorted array of 16-bit numbers, and a fuller one is a bitmap of 65 536 bits, which is 8 KiB, the size of an array of 4096 values.
+
+<PositionSetAnimation />
+
+Positions in an event log are dense where a key is common and sparse where it is rare, so the containers of a rare key tend to be small arrays and those of a common type tend to be bitmaps. A set is written in roaring's portable format, the one the C, Java and Go implementations of roaring read, and always in the same form: containers in order, an array or a bitmap chosen by size alone, and no run containers. Two nodes, or two rebuilds on one node, therefore write the same bytes for the same positions.
+
+## Key tables
 
 When a segment is sealed, a background thread writes two files beside it after the next commit:
 
 | File | Holds |
 | --- | --- |
-| `.keys` | The key table: every key in the segment with the set of positions that have it, and a directory of the keys sorted by hash, so a lookup finds a key, or finds that it is absent, in a few probes. |
+| `.keys` | The key table: every key in the segment with its position set. |
 | `.idx` | The locator: the byte offset of every event in the segment. |
 
-Both files are written under a temporary name, synced, and then moved to their final name. Every section carries CRC32C checks, verified the first time it is read. Until the files exist, readers use the sealed segment's in-memory index.
+A key table has a 128-byte header and five sections:
+
+| Section | Holds |
+| --- | --- |
+| Bitmaps | Each key's position set, back to back. |
+| Keys | The key bytes, back to back. |
+| Directory | One 40-byte entry per key: the key's hash, where its bytes and its position set start, their lengths, and the number of positions. The entries are sorted by hash. |
+| Directory checks | A CRC32C for each block of 128 directory entries and their keys. |
+| Bitmap checks | A CRC32C for each 4 KiB of the bitmaps section. |
+
+A key's hash is a 64-bit MurmurHash64A of its bytes with a fixed seed, so the same key has the same hash on every node. Because the hashes are spread evenly from `0x0000…` to `0xffff…`, a lookup estimates where in the directory the key must be from its hash, reads that entry, and narrows the range by interpolation for up to four rounds before it falls back to binary search. A lookup finds a key, or shows it is absent, in two or three probes, so the directory needs no separate filter.
+
+<KeyLookupAnimation />
+
+A key table is read through a memory mapping, and a position set is not decoded as a whole. A question such as "the first position at or after 5" finds the containers it needs by binary search over the container keys and reads only those. Each 4 KiB of the bitmaps and each block of the directory is checked against its CRC32C the first time a read touches it.
+
+Both files are written under a temporary name, synced, and then moved to their final name. Until they exist, readers use the sealed segment's in-memory index.
 
 ## Merging key tables
 
 A long log has many segments, and a query that consulted every segment's key table would open thousands of files. In the background, the server merges the key tables of eight consecutive segments into one table, then eight of those tables into one, and so on. A query over a long log reads a few large tables.
 
 <MergeAnimation />
+
+A merged table has the same format as a segment's key table, over a longer range of positions, and a merge is a k-way merge of tables in hash order. Its position sets are counted from the table's base, so a table covers at most 2³²−1 positions; a block that would cover more is left as its eight parts.
 
 Only segments whose events are all committed are merged: sealed, with their key table on disk, and below the watermark. A merge writes the new table, then rewrites a manifest in the `index` directory that names the tables in use. The new table is in use from the moment the manifest names it. Queries that started earlier finish on the tables they opened, and the old key tables are then deleted. If the server stops during a merge, it uses the tables the manifest names and removes the rest. Segment files and locators are not changed by a merge.
 
