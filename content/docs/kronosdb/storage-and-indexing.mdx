@@ -1,0 +1,16 @@
+---
+title: Storage and indexing
+description: How KronosDB writes events to disk, makes them durable, indexes them by type and tag, and answers a query, as of KronosDB 0.16.
+---
+
+This page follows one event from the append that writes it to the query that reads it back. It describes KronosDB 0.16. Nothing here is needed to use KronosDB; it explains why appends, conditions and queries behave as the rest of these docs describe.
+
+<StorageAndIndexing />
+
+The animation scales segments down to 640 bytes so that one fits on screen. Real segments are 256 MiB by default, and are cut by size, so they hold different numbers of events. The byte offsets and file sizes shown are computed from the real record and file layouts for these seven events. Press play, or step through with the arrow keys.
+
+## Related
+
+- [Events and tags](/docs/kronosdb/events-and-tags) describes events, tags, positions and conditional appends from a client's point of view.
+- [Clustering and replication](/docs/kronosdb/replication) covers how the log is copied to other nodes.
+- [Back up and restore](/docs/kronosdb/backups) covers the archive.

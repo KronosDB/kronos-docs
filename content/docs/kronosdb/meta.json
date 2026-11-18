@@ -16,6 +16,8 @@
     "clustering",
     "backups",
     "monitoring",
-    "admin-console"
+    "admin-console",
+    "---How KronosDB works---",
+    "storage-and-indexing"
   ]
 }
