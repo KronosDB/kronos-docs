@@ -1,16 +1,81 @@
 ---
 title: Storage and indexing
-description: How KronosDB writes events to disk, makes them durable, indexes them by type and tag, and answers a query, as of KronosDB 0.16.
+description: How KronosDB writes events to disk, makes them durable, indexes them by type and tag, and reads them back.
 ---
 
-This page follows one event from the append that writes it to the query that reads it back. It describes KronosDB 0.16. Nothing here is needed to use KronosDB; it explains why appends, conditions and queries behave as the rest of these docs describe.
+This page describes what KronosDB does with an event between the append that writes it and the query that reads it back. Nothing here is needed to use KronosDB. It explains why appends, conditions and queries behave as the rest of these docs describe, and what the files in a data directory are.
 
-<StorageAndIndexing />
+## Segments
 
-The animation scales segments down to 640 bytes so that one fits on screen. Real segments are 256 MiB by default, and are cut by size, so they hold different numbers of events. The byte offsets and file sizes shown are computed from the real record and file layouts for these seven events. Press play, or step through with the arrow keys.
+Each [context](/docs/kronosdb/contexts) stores its events in a log, and the log is a sequence of segment files. New events are always written to the end of the newest file, the active segment. When the next event does not fit, the server starts a new segment and seals the old one, which is never written to again.
+
+<SegmentsAnimation />
+
+A segment is 256 MiB by default (`segment-size`). Its file is named after its base position, the position of its first event, so `00000000000000000000.seg` holds the events from position 0 and the next file name gives the position where the first segment ends. The server allocates the active file at full size when it creates it, and trims it to the length of its data when it is sealed.
+
+## Records
+
+Each event is stored as one record. A record has a 9-byte header, which holds a CRC32C checksum, the record's length and a flags byte, followed by the event: its position, identifier, type, version, timestamp, metadata, tags and payload. The checksum covers the flags and the event, and every read checks it.
+
+Tags are stored in the record with the rest of the event. Every index described below is built from the records, so a lost or damaged index file is rebuilt from the segment it belongs to.
+
+A client sends events in the same layout they have on disk. The server writes the event's position into the record and computes its checksum, and does not encode the event again.
+
+## Durability
+
+Writing a record puts its bytes in the operating system's page cache, which does not survive a power failure. To make writes durable, the server groups them into commit waves. An append writes its records and joins the current wave. A sync thread closes the wave, calls `fdatasync` once for every record in it, and then moves the commit watermark past it. Appends that arrive while a sync is running join the next wave.
+
+<GroupCommitAnimation />
+
+An append is acknowledged when the watermark passes its last event, and reads return only events below the watermark, so a client never reads an event that could still be lost. The size of a wave adjusts to the load: one append on an idle server gets a wave of its own, and under load each `fdatasync` covers many appends. There is no timer by default; `group-commit-ms` adds a wait before each sync.
+
+In a cluster, the watermark is the position that a majority of the voters have reached, so an acknowledgement waits for that majority. Whether "reached" means written or synced is the `ack-mode` setting, described in [Configuration](/docs/kronosdb/configuration) and [Clustering and replication](/docs/kronosdb/replication).
+
+## Indexes
+
+Every event is indexed under one key for its type and one key for each of its tags, so `ToolRented` with the tags `toolId=t-1` and `customerId=ada` is indexed under three keys. For each key, the index holds the set of positions of the events that have it, stored as compressed bitmaps.
+
+<IndexingAnimation />
+
+The active segment's index is kept in memory, together with the byte offset of each event in the file. It is updated as each record is written and is not saved to disk. When the server starts, it rebuilds the active segment's index by reading the segment.
+
+When a segment is sealed, a background thread writes two files beside it after the next commit:
+
+| File | Holds |
+| --- | --- |
+| `.keys` | The key table: every key in the segment with the set of positions that have it, and a directory of the keys sorted by hash, so a lookup finds a key, or finds that it is absent, in a few probes. |
+| `.idx` | The locator: the byte offset of every event in the segment. |
+
+Both files are written under a temporary name, synced, and then moved to their final name. Every section carries CRC32C checks, verified the first time it is read. Until the files exist, readers use the sealed segment's in-memory index.
+
+## Merging key tables
+
+A long log has many segments, and a query that consulted every segment's key table would open thousands of files. In the background, the server merges the key tables of eight consecutive segments into one table, then eight of those tables into one, and so on. A query over a long log reads a few large tables.
+
+<MergeAnimation />
+
+Only segments whose events are all committed are merged: sealed, with their key table on disk, and below the watermark. A merge writes the new table, then rewrites a manifest in the `index` directory that names the tables in use. The new table is in use from the moment the manifest names it. Queries that started earlier finish on the tables they opened, and the old key tables are then deleted. If the server stops during a merge, it uses the tables the manifest names and removes the rest. Segment files and locators are not changed by a merge.
+
+## Reading
+
+A query is a list of criteria, each naming event types, tags or both. For each criterion, the server looks up the position set of every tag and intersects them, looks up the sets of the named types and intersects their union with the tag result, and then takes the union over the criteria. It does this per range of the log: merged tables for the oldest segments, segment key tables after them, and the in-memory index for the active segment. A key that is missing from a table's directory rules out that whole range without reading any position set.
+
+<QueryAnimation />
+
+Each matching position is then turned into a byte offset by its segment's locator, and the record is read from the segment file, which the server maps into memory. A record whose checksum does not match fails the read with an error instead of being returned.
+
+The server sends the records to the client in `Events` messages of up to 1024 events or 1 MiB each. The last message carries the head position at the time of the request, the consistency marker that the client passes in the condition of its next append.
+
+## Conditional appends
+
+An append condition requires that no event matching its criteria exists at or after the marker. The server checks this with the same indexes, without reading any event: the key tables for the sealed part of that range and the in-memory index for the active segment. When a matching event exists, nothing is written and the client receives its position. If that event is not yet committed, the rejection waits until it is, so a client is never refused because of an event that could still be lost.
+
+## Archived segments
+
+With an [archive](/docs/kronosdb/backups) configured, committed segments are copied to object storage, and a node over its disk limit can delete its local copy of an archived segment. The key tables and locators stay on the node, so a query finds its positions as before, and only the record bytes are read from the archive, by byte range.
 
 ## Related
 
-- [Events and tags](/docs/kronosdb/events-and-tags) describes events, tags, positions and conditional appends from a client's point of view.
+- [Events and tags](/docs/kronosdb/events-and-tags) describes events, tags, positions and conditional appends from a client's side.
 - [Clustering and replication](/docs/kronosdb/replication) covers how the log is copied to other nodes.
-- [Back up and restore](/docs/kronosdb/backups) covers the archive.
+- [Configuration](/docs/kronosdb/configuration) lists `segment-size`, `group-commit-ms`, `ack-mode` and the read settings.

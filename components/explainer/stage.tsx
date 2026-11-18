@@ -185,16 +185,3 @@ export function Arrow({
   )
 }
 
-/**
- * Plays its children in after `at` milliseconds of a step, or out with `out`.
- * While the player is paused or stepped by hand, the finished state shows at
- * once (see `.kx-reveal` in global.css). Give the enclosing group a `key`
- * that changes when its step starts, so the reveal replays.
- */
-export function Reveal({ at, out, children }: { at: number; out?: boolean; children: ReactNode }) {
-  return (
-    <g className={out ? "kx-vanish" : "kx-reveal"} style={{ animationDelay: `${at}ms` }}>
-      {children}
-    </g>
-  )
-}

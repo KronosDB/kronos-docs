@@ -7,7 +7,7 @@ import { Tab, Tabs } from "fumadocs-ui/components/tabs"
 import { File, Files, Folder } from "fumadocs-ui/components/files"
 import { Accordion, Accordions } from "fumadocs-ui/components/accordion"
 import { TypeTable } from "fumadocs-ui/components/type-table"
-import { StorageAndIndexing } from "@/components/explainer/storage-and-indexing"
+import { GroupCommitAnimation, IndexingAnimation, MergeAnimation, QueryAnimation, SegmentsAnimation } from "@/components/explainer/storage"
 import { notFound } from "next/navigation"
 import { source } from "@/lib/source"
 
@@ -30,7 +30,11 @@ export default async function Page(props: { params: Promise<{ slug?: string[] }>
             File, Files, Folder,
             Accordion, Accordions,
             TypeTable,
-            StorageAndIndexing,
+            SegmentsAnimation,
+            GroupCommitAnimation,
+            IndexingAnimation,
+            MergeAnimation,
+            QueryAnimation,
           }}
         />
       </DocsBody>
