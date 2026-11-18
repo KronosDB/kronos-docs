@@ -21,6 +21,7 @@
     "segments",
     "durability",
     "indexes",
-    "reads"
+    "reads",
+    "performance"
   ]
 }

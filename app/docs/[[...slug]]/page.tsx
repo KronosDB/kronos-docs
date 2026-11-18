@@ -17,6 +17,14 @@ import {
   QueryAnimation,
   SegmentsAnimation,
 } from "@/components/explainer/storage"
+import {
+  AppendChart,
+  ClusterOneZoneChart,
+  ClusterThreeZoneChart,
+  ConditionalAppendChart,
+  TagReadChart,
+  WholeLogReadChart,
+} from "@/components/benchmarks/charts"
 import { notFound } from "next/navigation"
 import { source } from "@/lib/source"
 
@@ -47,6 +55,12 @@ export default async function Page(props: { params: Promise<{ slug?: string[] }>
             PositionSetAnimation,
             KeyLookupAnimation,
             LeapfrogAnimation,
+            AppendChart,
+            ConditionalAppendChart,
+            TagReadChart,
+            WholeLogReadChart,
+            ClusterOneZoneChart,
+            ClusterThreeZoneChart,
           }}
         />
       </DocsBody>

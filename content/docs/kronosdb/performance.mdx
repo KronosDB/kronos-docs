@@ -1,0 +1,78 @@
+---
+title: Performance
+description: "Measured throughput and latency of KronosDB and of Postgres 16 on the same AWS hardware, and what replication costs in a three-node cluster."
+---
+
+This page reports benchmarks of KronosDB on AWS: a single node compared with Postgres 16 on the same server, and a three-node KronosDB cluster with each acknowledgement mode. Both stores sync their log to disk before they acknowledge a write, so the single-node numbers compare the same durability. Hover a bar for its median and 99th-percentile latency, or show a chart as a table.
+
+## Setup
+
+Both stores ran on the same server, one at a time, and were driven from the same client machine by the same Rust harness. Every measurement started from a freshly started server and an empty data directory.
+
+| | |
+| --- | --- |
+| Server | AWS i4i.2xlarge: Intel Xeon Platinum 8375C, 8 vCPU, 64 GB, 1.7 TB local NVMe (XFS, `noatime`), Amazon Linux 2023 |
+| Client | AWS c7i.2xlarge, 8 vCPU, in the same availability zone and cluster placement group (round trip 0.29 ms) |
+| KronosDB | Development build `262f024` (after 0.10.1, with the native protocol), default settings. A single node acknowledges an append after `fdatasync`. |
+| Postgres | 16.15 with `fsync`, `synchronous_commit` and `full_page_writes` on, `shared_buffers` 16 GB, `wal_buffers` 64 MB, `max_wal_size` 32 GB. Events in one table with a GIN index on tags and a B-tree index on type. An append takes a shared advisory lock, checks the condition, inserts all its events in one statement and sends a `NOTIFY` after commit, as `@kronos-ts/postgres` does. |
+| Clients | KronosDB's native protocol client; `tokio-postgres` for Postgres |
+| Method | 10 000 events loaded first, 3 s warm-up, 10 s measured. The median of 5 runs for single events and of 3 runs for batches and reads. |
+
+## Appends
+
+Each client appends events in a loop and waits for each acknowledgement. A batch of 100 or 1000 events is one append.
+
+<AppendChart />
+
+KronosDB groups appends that arrive together into one `fdatasync` ([Durability](/docs/kronosdb/durability)). Postgres syncs its write-ahead log at each commit, and each append also inserts into the table's indexes, including the GIN index on tags, in the same transaction. With one client the difference shows as latency: a median of 0.13 ms per append for KronosDB against 0.70 ms for Postgres.
+
+## Conditional appends
+
+A conditional append writes only if no event matching its condition exists after a given position.
+
+<ConditionalAppendChart />
+
+KronosDB checks the condition with its in-memory index and key tables, without reading events ([Reads and conditions](/docs/kronosdb/reads)). Postgres runs the check as a query inside the append's transaction. This is the largest difference measured: 11.7 times at 16 clients.
+
+## Reads
+
+A read by tag returns the 10 events of one entity, as a command handler does when it loads state.
+
+<TagReadChart />
+
+A read of the whole log returns 100 000 events in batches of 5000, as an event processor does when it replays from the start.
+
+<WholeLogReadChart />
+
+With 4 or more clients, both stores reach about 3.7 million events per second, which is the client's network link (12.5 Gbit/s). The whole-log numbers past one client measure the network, not the stores.
+
+## Clusters
+
+In a cluster, an append is acknowledged when a majority of the voters have it. The `ack-mode` setting chooses whether that means written by a majority (`written`) or synced to disk by a majority (`durable`). The charts show both modes on three voters. The badge is the change from `written` to `durable`.
+
+| | |
+| --- | --- |
+| Nodes | Three AWS i4i.2xlarge voters, local NVMe, default 256 MiB segments |
+| Build | Development build `417d327` (after 0.10.1, with the native protocol) |
+| Client | c6i.2xlarge (one zone) or c7i.2xlarge (three zones), in the same zone as the leader |
+| Method | A fresh cluster for each mode and round, 1 s warm-up, 8 s measured, the mean of 3 rounds |
+
+<ClusterOneZoneChart />
+
+<ClusterThreeZoneChart />
+
+Syncing on the followers adds 0.02 to 0.16 ms at the median, which is one follower `fdatasync` on NVMe. In one zone that is 9 to 19 percent of throughput. Across three zones, where each acknowledgement already waits about 1 ms for the network, it is 3 to 10 percent. Sending appends to a follower, which forwards them to the leader, adds a network round trip: about 0.1 ms in one zone and about 2 ms across zones.
+
+At 256 clients the cluster numbers may be limited by the client machine, which was not measured.
+
+## What these numbers do not show
+
+- Each run used spot instances in one AWS region, and each run was made once. The spread between repeated measurements within a run was typically within 10 percent.
+- The tested builds are development builds from before 0.11.0. Later releases changed the commit path, so current numbers can differ.
+- Both stores ran with one client machine. Points with many clients may measure the client as well as the store.
+
+## Related
+
+- [Durability](/docs/kronosdb/durability) describes commit waves and acknowledgement.
+- [Reads and conditions](/docs/kronosdb/reads) describes how queries and conditions use the indexes.
+- [Configuration](/docs/kronosdb/configuration) lists `ack-mode`.

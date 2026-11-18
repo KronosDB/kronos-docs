@@ -114,3 +114,7 @@ h1, h2, h3 { letter-spacing: -0.02em; }
 }
 .kx-zoom { transition: none; }
 }
+
+/* ── Benchmark charts (components/benchmarks); palette validated for CVD and contrast ── */
+.kb-chart { --kb-kronosdb: #9a7b2e; --kb-postgres: #2a78d6; --kb-written: #6250d6; }
+.dark .kb-chart { --kb-kronosdb: #b08d3a; --kb-postgres: #3987e5; --kb-written: #9085e9; }
