@@ -1,14 +1,24 @@
 import { afterEvents, commandHandler, eventHandler, queryHandler, snapshot, state } from "@kronos-ts/core"
 import { z } from "zod"
-import { AddTool, GetInventory, ToolAdded } from "./descriptors.js"
+import { ToolAdded, ns } from "./events"
+
+export const AddTool = ns.command("AddTool", {
+  payload: z.object({ toolId: z.string().min(1), model: z.string().min(1), name: z.string().min(1), category: z.string().min(1) }),
+  result: z.object({ ok: z.literal(true) }),
+})
+
+export const GetInventory = ns.query("GetInventory", {
+  payload: z.object({}),
+  result: z.array(z.object({ toolId: z.string(), name: z.string(), category: z.string() })),
+})
 
 export const Tool = snapshot(
   state({
     id: { toolId: z.string() },
     tags: (id) => ({ toolId: id.toolId }),
     evolve: [
-      () => ({ exists: false, category: "" }),
-      [ToolAdded, (tool, { payload }) => ({ ...tool, exists: true, category: payload.category })],
+      (): { added: false } | { added: true; category: string } => ({ added: false }),
+      [ToolAdded, (_tool, { payload }) => ({ added: true, category: payload.category })],
     ],
   }),
   "tool-v2",
@@ -17,8 +27,9 @@ export const Tool = snapshot(
 
 export const addTool = commandHandler(AddTool, async ({ payload }, ctx) => {
   const tool = await ctx.load(Tool, { toolId: payload.toolId })
-  if (tool.exists) throw new Error(`tool ${payload.toolId} already exists`)
+  if (tool.added) return { ok: true }
   ctx.append(ToolAdded, payload)
+  return { ok: true }
 })
 
 const inventory = new Map<string, { toolId: string; name: string; category: string }>()

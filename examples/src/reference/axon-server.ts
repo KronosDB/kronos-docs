@@ -18,7 +18,6 @@ import {
   axonServerEventStore,
   axonServerQueryBus,
   axonServerSnapshottingEventStore,
-  type ManagedEventProcessor,
 } from "@kronos-ts/axon-server"
 import { z } from "zod"
 
@@ -66,7 +65,7 @@ export async function run(token: string) {
   })
 
   await axon.start()
-  const control = await axonServerControlPlane(axon, app.processors.values() as Iterable<ManagedEventProcessor>)
+  const control = await axonServerControlPlane(axon, app.processors)
 
   await send(commandBus, AddTool, { toolId: "t-1", model: "DCD791", name: "Cordless drill" })
 

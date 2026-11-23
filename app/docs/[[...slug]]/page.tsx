@@ -6,7 +6,8 @@ import { Step, Steps } from "fumadocs-ui/components/steps"
 import { Tab, Tabs } from "fumadocs-ui/components/tabs"
 import { File, Files, Folder } from "fumadocs-ui/components/files"
 import { Accordion, Accordions } from "fumadocs-ui/components/accordion"
-import { TypeTable } from "fumadocs-ui/components/type-table"
+import { OptionsTable } from "@/components/options-table"
+import { FileTree, TreeFile, TreeFolder } from "@/components/file-tree"
 import {
   GroupCommitAnimation,
   IndexingAnimation,
@@ -46,7 +47,8 @@ export default async function Page(props: { params: Promise<{ slug?: string[] }>
             Tab, Tabs,
             File, Files, Folder,
             Accordion, Accordions,
-            TypeTable,
+            TypeTable: OptionsTable,
+            FileTree, TreeFile, TreeFolder,
             SegmentsAnimation,
             GroupCommitAnimation,
             IndexingAnimation,

@@ -46,7 +46,7 @@ export const Tool = state({
 // Command handler
 export const addTool = commandHandler(AddTool, async ({ payload }, ctx) => {
   const tool = await ctx.load(Tool, { toolId: payload.toolId })
-  if (tool.exists) throw new Error(`tool ${payload.toolId} already exists`)
+  if (tool.exists) return
   ctx.append(ToolAdded, payload)
 })
 

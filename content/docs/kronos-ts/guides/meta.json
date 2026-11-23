@@ -2,12 +2,16 @@
   "title": "Guides",
   "defaultOpen": true,
   "pages": [
-    "slices-and-modules",
+    "index",
+    "slices",
     "refusing-a-command",
     "testing-a-slice",
-    "running-on-postgres",
+    "automations",
     "projecting-into-tables",
+    "drizzle",
+    "optimizing-projections",
     "replaying-a-projection",
+    "running-on-postgres",
     "running-on-kronosdb",
     "across-processes",
     "changing-an-event"

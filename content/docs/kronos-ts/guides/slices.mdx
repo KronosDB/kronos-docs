@@ -1,0 +1,231 @@
+---
+title: Organize an app into slices
+description: Split the tool store into one folder per feature, have every slice return its handler lists, and wrap every handler and give it its infrastructure in main.ts.
+---
+
+When you are done, every feature of the tool store is a folder whose `index.ts` returns its handler lists, the context lists its slices, and `main.ts` opens the infrastructure, pipes every handler through the wrappers the whole app shares and gives it its infrastructure. This is the layout we recommend, and the one the other guides use. You need the tool store from [Getting started](/docs/kronos-ts/getting-started) and a Postgres database, as set up in [Run on Postgres](/docs/kronos-ts/guides/running-on-postgres).
+
+A **slice** is one feature: one command, one read model or one automation, with the descriptors, states and handlers that implement it. A slice returns its handlers in the three lists `kronos()` takes, the contexts pass the slices up, and `main.ts` takes them all. The infrastructure exists only in `main.ts`. `kronos()` has no slice type of its own.
+
+## Lay out the folders
+
+Every slice is a folder with the same files, and every folder belongs to a context, a part of the system with one namespace and one set of events. The tool store is one context:
+
+<FileTree>
+  <TreeFolder name="src">
+    <TreeFile name="pipe.ts" note="`pipe`, which applies wrappers innermost first" />
+    <TreeFile name="main.ts" note="opens the infrastructure, wraps every handler, starts the app" />
+    <TreeFile name="migrations.ts" note="the tables the slices write" />
+    <TreeFile name="test.ts" note="`testInfrastructure`: the same composition over in-memory stores" />
+    <TreeFolder name="slices">
+      <TreeFolder name="toolstore">
+        <TreeFile name="events.ts" note="the namespace and every event of the context" />
+        <TreeFile name="index.ts" note="the context's slices, listed" />
+        <TreeFolder name="add-tool" collapsed>
+          <TreeFile name="command.ts" note="`AddTool` and its result" />
+          <TreeFile name="state.ts" note="`Tool`: whether the tool is added" />
+          <TreeFile name="handler.ts" note="loads `Tool`, appends `ToolAdded`" />
+          <TreeFile name="index.ts" note="the slice function" />
+        </TreeFolder>
+        <TreeFolder name="register-customer" collapsed>
+          <TreeFile name="command.ts" note="`RegisterCustomer` and its result" />
+          <TreeFile name="state.ts" note="`Customer`: whether the customer is registered" />
+          <TreeFile name="handler.ts" note="loads `Customer`, appends `CustomerRegistered`" />
+          <TreeFile name="index.ts" note="the slice function" />
+        </TreeFolder>
+        <TreeFolder name="rent-tool">
+          <TreeFile name="command.ts" note="`RentTool` and every refusal it can return" />
+          <TreeFile name="state.ts" note="`Renting`: the tool, the customer and their rentals" />
+          <TreeFile name="handler.ts" note="loads `Renting`, decides, appends `ToolRented`" />
+          <TreeFile name="index.ts" note="the slice function" />
+          <TreeFile name="rent-tool.test.ts" note="one test per scenario" />
+        </TreeFolder>
+        <TreeFolder name="inventory" collapsed>
+          <TreeFile name="query.ts" note="`GetInventory`" />
+          <TreeFile name="table.ts" note="creates the `inventory` table" />
+          <TreeFile name="projection.ts" note="the event handlers" />
+          <TreeFile name="handler.ts" note="the query handler" />
+          <TreeFile name="index.ts" note="the slice function, with its processor" />
+          <TreeFile name="inventory.test.ts" note="the read model's storyline" />
+        </TreeFolder>
+      </TreeFolder>
+    </TreeFolder>
+  </TreeFolder>
+</FileTree>
+
+A command slice has `command.ts` with the descriptor and its result, `state.ts` with every state the decision loads, `handler.ts` and `index.ts`. A read model slice has `query.ts`, the table it writes, `projection.ts` with its event handlers, `handler.ts` with its query handler, and `index.ts`. The folder is named after the feature in kebab case (`rent-tool`), and the function its `index.ts` exports in camel case (`rentTool`). The context's folder and namespace are its name in kebab case (`toolstore`). Commands, events and queries are named in Pascal case: a command as an instruction (`RentTool`), an event as a fact in the past tense (`ToolRented`), and a query as what it reads (`GetInventory`).
+
+## Declare the events in one file
+
+The events of a context are declared together in `events.ts`, with the namespace. A slice imports the events it appends or folds from this file and never imports from another slice, so events are the only code slices share:
+
+```ts
+export const ns = withNamespace("toolstore")
+
+export const ToolAdded = ns.event("ToolAdded", {
+  payload: z.object({ toolId: z.string(), model: z.string(), name: z.string() }),
+  tags: { toolId: (payload) => payload.toolId },
+})
+```
+
+Decide an event's tags when you add the event, for every state that will load it and not only the first. Tags are stored when the event is appended, so a tag added later is missing from the events already in the log, as described under [Tags](/docs/kronos-ts/messages#tags).
+
+## Write a command slice
+
+The `rent-tool` folder holds the renting feature. `command.ts` declares the command with the same namespace, and its result lists each refusal with the facts the caller may read:
+
+```ts
+export const RentTool = ns.command("RentTool", {
+  payload: z.object({ toolId: z.string().min(1), customerId: z.string().min(1) }),
+  result: z.union([
+    z.object({ ok: z.literal(true) }),
+    z.object({ ok: z.literal(false), rejection: z.literal("TOOL_UNAVAILABLE"), toolId: z.string() }),
+    z.object({ ok: z.literal(false), rejection: z.literal("CUSTOMER_UNKNOWN"), customerId: z.string() }),
+    z.object({
+      ok: z.literal(false),
+      rejection: z.literal("OVER_LIMIT"),
+      customerId: z.string(),
+      maxRentals: z.number().int(),
+    }),
+  ]),
+})
+```
+
+Every constraint on a field is declared on the schema, and `main.ts` wraps every handler in `validatingHandler`, so a handler never parses its payload. On a command's payload a required string is `z.string().min(1)`, so an empty string is refused as a missing value; give a field its format where it has one, such as `z.uuid()` for an id or `z.email()` for an email address. A rule with a number in it, such as a rental limit, is a business rule and a refusal, not a schema limit. Events keep the plain types, because they record what a decision already accepted.
+
+A command that creates something carries the id of what it creates, chosen by the caller, as `AddTool` carries `toolId`, and the handler never generates one. The caller can then send the same command again and it lands once.
+
+`state.ts` holds the state the decision loads, keyed by the ids the decision is about: the tool and the customer. Each field holds a fact, and nothing stands for "not known yet": a customer is either not registered, or registered with a rental limit, so there is no `maxRentals` of 0 for a customer who does not exist.
+
+```ts
+type Customer = { registered: false } | { registered: true; maxRentals: number }
+
+type Renting = {
+  toolAdded: boolean
+  customer: Customer
+  rentals: { toolId: string; customerId: string }[]
+}
+```
+
+Give the initial value its type, as `(): Renting => ({ … })` does, so the fold's type does not collapse to the literal value.
+
+`handler.ts` loads the state, decides and appends. A command sent a second time after it succeeded returns `{ ok: true }` and appends nothing, so a caller can send it again after a timeout:
+
+```ts
+if (rentalsOfTool.some((rental) => rental.customerId === customerId)) return { ok: true }
+if (!renting.toolAdded || rentalsOfTool.length > 0) return { ok: false, rejection: "TOOL_UNAVAILABLE", toolId }
+if (!renting.customer.registered) return { ok: false, rejection: "CUSTOMER_UNKNOWN", customerId }
+```
+
+A handler that needs the current time reads `ctx.unitOfWork.now()`, never `Date.now()` or `new Date()`: a test moves that clock, and every message the handling records carries it.
+
+`index.ts` exports the slice: a function that returns its handlers in the three lists `kronos()` takes, an empty list for each kind it has none of. The renting slice needs nothing from outside, so its function takes no arguments:
+
+```ts
+export const rentTool = () => ({ commandHandlers: [handle], queryHandlers: [], eventHandlers: [] })
+```
+
+## Write a read model slice
+
+The inventory slice's `projection.ts` holds its event handlers, and `handler.ts` its query handler. Its `index.ts` exports a function of the one thing the slice decides with but cannot build itself, its processor:
+
+```ts
+export const inventory = (eventProcessor: (name: string) => EventProcessor) => {
+  // Named for the table it writes. A batch of up to 100 events commits in one transaction with the position.
+  const processor = batched(eventProcessor("inventory-view"), 100)
+  return {
+    commandHandlers: [],
+    queryHandlers: [handle],
+    eventHandlers: projection.map((handler) => ({ ...handler, processor })),
+  }
+}
+```
+
+`eventProcessor` here is Kronos's `eventProcessor` with the event store, the token store and the unit of work already applied in `main.ts`, so it takes only a name. The slice decides what is its own, the processor's name and batch size, and never receives the stores, which differ between production and tests. The name is where the processor's position is stored: give it a new name when the table it writes changes, and it reads the log again from the start.
+
+The handlers write the table through `ctx.sql()`, which `main.ts` supplies to every query and event handler. [Project into your own tables](/docs/kronos-ts/guides/projecting-into-tables) covers the table and the handlers.
+
+## List the slices in their context
+
+The context's `index.ts` lists its slices, passing each one what it needs. A slice that is not listed here does not run:
+
+```ts
+export const toolstore = (eventProcessor: (name: string) => EventProcessor) => [
+  addTool(),
+  registerCustomer(),
+  rentTool(),
+  inventory(eventProcessor),
+]
+```
+
+A new slice adds one line to its context. A second context is called from `main.ts` beside the first.
+
+## Compose in main.ts
+
+`main.ts` opens the infrastructure and calls each context. The function the slices receive as `eventProcessor` is written here, anonymously, by applying Kronos's `eventProcessor` to the stores, and passed down through the context:
+
+```ts
+const handlers = [
+  ...toolstore((name) => eventProcessor(name, eventStore, postgresTokenStore(pg), postgresUnitOfWork(unitOfWork, pg))),
+]
+```
+
+Then it passes every handler to `kronos()`. Each list takes every slice's handlers of that kind, flattens them into one list, pipes each handler through the wrappers the whole app shares, innermost first, and gives it its event store and buses:
+
+```ts
+const app = kronos({
+  commandHandlers: handlers
+    .map((slice) => slice.commandHandlers)
+    .flat()
+    .map((handler) => ({
+      ...handler,
+      handler: pipe(handler.handler, (next) => validatingHandler(next, handler.descriptor)),
+      eventStore,
+      commandBus,
+      queryBus,
+    })),
+  queryHandlers: handlers
+    .map((slice) => slice.queryHandlers)
+    .flat()
+    .map((handler) => ({
+      ...handler,
+      handler: pipe(
+        handler.handler,
+        (next) => postgresHandler(next, pg),
+        (next) => validatingHandler(next, handler.descriptor),
+      ),
+      queryBus,
+    })),
+```
+
+The event handler list is built the same way and keeps the processor each slice gave its handlers. `postgresHandler` gives query and event handlers `ctx.sql()`, and `validatingHandler` checks the payload, the result and every appended event against their descriptors. This is the only code that combines handlers with infrastructure, so every handler gets the same wrappers. `main.ts` lists only the kinds of handler some slice has: an empty list gives TypeScript no handler to infer the type from, so the first slice of a kind adds that kind's list, written in the same way. A wrapper only one slice needs stays in that slice, inside these. [Interception and validation](/docs/kronos-ts/interception-and-validation) and [Observability](/docs/kronos-ts/observability) describe the wrappers Kronos ships.
+
+`main.ts` is also the one place that reads settings, such as `DATABASE_URL`, from the environment. Kronos's packages take plain options and read no environment variables.
+
+A test composes only the slices it tests, in the same way, over in-memory stores, as [Test a slice](/docs/kronos-ts/guides/testing-a-slice) shows. A process that runs part of the application composes only its slices, as [Split across processes](/docs/kronos-ts/guides/across-processes) shows.
+
+## Checking it works
+
+`main.ts` adds two tools, registers Ada and Grace, sends four rentals that end in the four possible outcomes, waits for the inventory processor to catch up and reads the inventory:
+
+```sh
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/toolstore bun run main.ts
+```
+
+```text title="Output"
+ada rents t-1: rented
+grace rents t-1: TOOL_UNAVAILABLE
+ada rents t-2: OVER_LIMIT
+linus rents t-2: CUSTOMER_UNKNOWN
+t-1  Cordless drill  rented
+t-2  Tile saw        available
+```
+
+Run it a second time and the output is the same. Every command it sends has already succeeded, so each returns `{ ok: true }` and appends nothing.
+
+## Related
+
+- [Guides](/docs/kronos-ts/guides) lists the conventions this layout follows.
+- [Test a slice](/docs/kronos-ts/guides/testing-a-slice) runs a slice's scenarios through the same wrappers.
+- [Split across processes](/docs/kronos-ts/guides/across-processes) runs different slices in different processes.
+- [Assembly](/docs/kronos-ts/assembly) describes `kronos()` and its entries.

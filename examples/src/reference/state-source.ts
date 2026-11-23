@@ -31,7 +31,10 @@ const ToolReturned = ns.event("ToolReturned", {
 
 const RentTool = ns.command("RentTool", {
   payload: z.object({ toolId: z.string(), customerId: z.string() }),
-  result: z.object({ rented: z.boolean() }),
+  result: z.union([
+    z.object({ ok: z.literal(true) }),
+    z.object({ ok: z.literal(false), rejection: z.literal("OVER_LIMIT"), customerId: z.string(), maxRentals: z.number() }),
+  ]),
 })
 
 const MAX_RENTALS = 2
@@ -43,9 +46,11 @@ export const rentTool = commandHandler(RentTool, async ({ payload }, ctx) => {
   })
   const rented = events.filter((event) => is(event, ToolRented)).length
   const returned = events.filter((event) => is(event, ToolReturned)).length
-  if (rented - returned >= MAX_RENTALS) return { rented: false }
+  if (rented - returned >= MAX_RENTALS) {
+    return { ok: false, rejection: "OVER_LIMIT", customerId: payload.customerId, maxRentals: MAX_RENTALS }
+  }
   ctx.append(ToolRented, payload)
-  return { rented: true }
+  return { ok: true }
 })
 
 const eventStore = inMemoryEventStore()

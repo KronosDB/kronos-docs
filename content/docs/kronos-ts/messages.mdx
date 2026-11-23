@@ -31,11 +31,15 @@ const ns = withNamespace("toolstore")
 
 export const RentTool = ns.command("RentTool", {
   payload: z.object({ toolId: z.string(), customerId: z.string() }),
-  result: z.discriminatedUnion("rented", [
-    z.object({ rented: z.literal(true) }),
+  result: z.union([
+    z.object({ ok: z.literal(true) }),
+    z.object({ ok: z.literal(false), rejection: z.literal("TOOL_UNAVAILABLE"), toolId: z.string() }),
+    z.object({ ok: z.literal(false), rejection: z.literal("CUSTOMER_UNKNOWN"), customerId: z.string() }),
     z.object({
-      rented: z.literal(false),
-      reason: z.enum(["tool-unavailable", "customer-unknown", "over-limit"]),
+      ok: z.literal(false),
+      rejection: z.literal("OVER_LIMIT"),
+      customerId: z.string(),
+      maxRentals: z.number().int(),
     }),
   ]),
 })

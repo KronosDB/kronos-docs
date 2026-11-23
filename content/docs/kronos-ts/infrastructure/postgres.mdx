@@ -147,7 +147,7 @@ export const app = kronos({
 })
 ```
 
-The guarantee for event handlers holds only when the token store, the dead-letter queue, `postgresHandler` and `postgresUnitOfWork` are built from the same pool. A client you create for the projection uses another connection, and so another transaction. `ctx.sql().unwrap()` returns the driver's own handle on the connection of the current transaction, so bind a query builder to it and never to a pool of its own. The handle is valid only while the transaction is open.
+The guarantee for event handlers holds only when the token store, the dead-letter queue, `postgresHandler` and `postgresUnitOfWork` are built from the same pool. A client you create for the projection uses another connection, and so another transaction. `ctx.sql().unwrap()` returns the driver's own handle on the connection of the current transaction, so bind a query builder to it and never to a pool of its own. The handle is valid only while the transaction is open. [Use Drizzle for typed tables](/docs/kronos-ts/guides/drizzle) does this with a ten-line handler wrapper.
 
 Outside `postgresHandler`, `postgresTransaction(ctx.unitOfWork)` returns the unit of work's transaction and opens it if it has not begun. It rejects for a unit of work that `postgresUnitOfWork` did not make.
 

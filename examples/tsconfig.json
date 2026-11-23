@@ -21,21 +21,6 @@
       "@kronos-ts/postgres/adapters/*": [
         "../../kronos-ts/packages/postgres/src/adapters/*.ts"
       ],
-      "@kronos-ts/drizzle": [
-        "../../kronos-ts/packages/drizzle/src/index.ts"
-      ],
-      "@kronos-ts/knex": [
-        "../../kronos-ts/packages/knex/src/index.ts"
-      ],
-      "@kronos-ts/kysely": [
-        "../../kronos-ts/packages/kysely/src/index.ts"
-      ],
-      "@kronos-ts/prisma": [
-        "../../kronos-ts/packages/prisma/src/index.ts"
-      ],
-      "@kronos-ts/typeorm": [
-        "../../kronos-ts/packages/typeorm/src/index.ts"
-      ],
       "@kronos-ts/kronosdb": [
         "../../kronos-ts/packages/kronosdb/src/index.ts"
       ],
@@ -47,15 +32,6 @@
       ],
       "@kronos-ts/otlp": [
         "../../kronos-ts/packages/otlp/src/index.ts"
-      ],
-      "drizzle-orm": [
-        "../../kronos-ts/packages/drizzle/node_modules/drizzle-orm/index.d.ts"
-      ],
-      "drizzle-orm/*": [
-        "../../kronos-ts/packages/drizzle/node_modules/drizzle-orm/*"
-      ],
-      "pg": [
-        "../../kronos-ts/node_modules/.bun/@types+pg@8.20.0/node_modules/@types/pg/index.d.ts"
       ]
     }
   },

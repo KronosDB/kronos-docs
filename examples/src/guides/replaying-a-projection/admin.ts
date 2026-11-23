@@ -1,26 +1,32 @@
 import type { RunningProcessor } from "@kronos-ts/core"
-import { replayInventory } from "./replay.js"
+import { replayInventory } from "../../toolstore/slices/toolstore/inventory/replay"
 
-const route = /^\/admin\/processors\/([^/]+)(\/replay)?$/
+/** The processors that can be replayed, each with the function that clears what it wrote. */
+const replays: Record<string, (processor: RunningProcessor) => Promise<void>> = {
+  "inventory-view": replayInventory,
+}
 
-export function adminRoutes(processors: ReadonlyMap<string, RunningProcessor>) {
-  return async (request: Request): Promise<Response> => {
-    const match = route.exec(new URL(request.url).pathname)
-    const processor = match?.[1] === undefined ? undefined : processors.get(match[1])
-    if (processor === undefined) return Response.json({ error: "no such processor" }, { status: 404 })
-
-    if (match?.[2] === undefined) {
+export function admin(processors: ReadonlyMap<string, RunningProcessor>) {
+  return {
+    status(name: string): Response {
+      const processor = processors.get(name)
+      if (processor === undefined) return Response.json({ error: `no processor ${name}` }, { status: 404 })
       const { running, position, caughtUp, replaying } = processor.status()
       return Response.json({ running, position: String(position), caughtUp, replaying })
-    }
+    },
 
-    if (request.method !== "POST") return new Response(null, { status: 405 })
-    if (processor.name !== "inventory-view") return Response.json({ error: "only inventory-view can be replayed" }, { status: 400 })
-    try {
-      await replayInventory(processor)
-    } catch (error) {
-      return Response.json({ error: String(error) }, { status: 409 })
-    }
-    return Response.json({ replaying: processor.replaying }, { status: 202 })
+    async replay(name: string): Promise<Response> {
+      const processor = processors.get(name)
+      const replay = replays[name]
+      if (processor === undefined || replay === undefined) {
+        return Response.json({ error: `${name} cannot be replayed` }, { status: 404 })
+      }
+      try {
+        await replay(processor)
+      } catch (error) {
+        return Response.json({ error: String(error) }, { status: 409 })
+      }
+      return Response.json({ replaying: processor.replaying }, { status: 202 })
+    },
   }
 }
