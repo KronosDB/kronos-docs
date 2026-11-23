@@ -3,20 +3,30 @@ import { afterAll } from "bun:test"
 import {
   type App,
   type CommandHandler,
+  deadLettering,
   type EventHandler,
   type EventProcessor,
   eventProcessor,
+  inMemoryDeadLetterQueue,
   inMemoryEventStore,
   inMemoryTokenStore,
   kronos,
   localCommandBus,
   localQueryBus,
   type QueryHandler,
+  type Sequence,
+  type SequencedDeadLetterQueue,
   type UnitOfWork,
   unitOfWork,
   validatingHandler,
 } from "@kronos-ts/core"
-import { postgresHandler, postgresPool, postgresTokenStore, postgresUnitOfWork } from "@kronos-ts/postgres"
+import {
+  postgresDeadLetterQueue,
+  postgresHandler,
+  postgresPool,
+  postgresTokenStore,
+  postgresUnitOfWork,
+} from "@kronos-ts/postgres"
 import { recordingCommandBus, recordingEventStore } from "@kronos-ts/test"
 import { pipe } from "./pipe"
 import { migrate } from "./migrations"
@@ -88,12 +98,15 @@ export async function testInfrastructure(options?: { db: true }) {
     return running
   }
 
+  const deadLetterQueue: SequencedDeadLetterQueue = database ? postgresDeadLetterQueue(pg) : inMemoryDeadLetterQueue()
+
   return {
     app,
     eventProcessor: (name: string) =>
       database
         ? eventProcessor(name, eventStore, postgresTokenStore(pg), postgresUnitOfWork(unitOfWork, pg))
         : eventProcessor(name, eventStore, inMemoryTokenStore(), unitOfWork),
+    deadLettering: (processor: EventProcessor, sequence: Sequence) => deadLettering(processor, deadLetterQueue, sequence),
   }
 }
 

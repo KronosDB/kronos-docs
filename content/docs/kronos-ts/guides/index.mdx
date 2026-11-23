@@ -37,6 +37,7 @@ Layout and composition:
 - One folder per feature, and one file of events per context, as [Lay out the folders](/docs/kronos-ts/guides/slices#lay-out-the-folders) describes.
 - A slice's `index.ts` returns its handlers, and `main.ts` is the only place that opens the infrastructure, wraps every handler with the wrappers the whole app shares and gives each its event store and buses, as [Compose in `main.ts`](/docs/kronos-ts/guides/slices#compose-in-maints) describes.
 - A slice declares its own processor from the `eventProcessor` it is given, and names it for what it writes or does, as [Write a read model slice](/docs/kronos-ts/guides/slices#write-a-read-model-slice) describes.
+- A slice that parks failures is given `deadLettering` with the application's dead-letter queue applied, and passes it only its processor and sequences, as [Write an automation](/docs/kronos-ts/guides/automations#give-the-automation-its-processor) describes.
 
 Messages and decisions:
 - An event's tags are decided when the event is added, for every state that will load it, as [Declare the events in one file](/docs/kronos-ts/guides/slices#declare-the-events-in-one-file) describes.

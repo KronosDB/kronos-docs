@@ -10,8 +10,8 @@ import { sendReceipt } from "."
 const sent: { receipt: { toolId: string; customerId: string }; idempotencyKey: string }[] = []
 const receipts = { send: async (receipt: { toolId: string; customerId: string }, idempotencyKey: string) => void sent.push({ receipt, idempotencyKey }) }
 
-const { app, eventProcessor } = await testInfrastructure()
-const scenarios = fixture(app(sendReceipt(receipts, eventProcessor)))
+const { app, eventProcessor, deadLettering } = await testInfrastructure()
+const scenarios = fixture(app(sendReceipt(receipts, eventProcessor, deadLettering)))
 
 it("sends a receipt when a tool is rented", async () => {
   const rental = { toolId: crypto.randomUUID(), customerId: crypto.randomUUID() }

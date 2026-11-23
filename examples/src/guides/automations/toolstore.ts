@@ -1,4 +1,4 @@
-import type { EventProcessor } from "@kronos-ts/core"
+import type { EventProcessor, Sequence } from "@kronos-ts/core"
 import { addTool } from "../../toolstore/slices/toolstore/add-tool"
 import { inventory } from "../../toolstore/slices/toolstore/inventory"
 import { registerCustomer } from "../../toolstore/slices/toolstore/register-customer"
@@ -11,10 +11,13 @@ import type { Receipts } from "./send-receipt/receipts"
 const receipts: Receipts = { send: async () => {} }
 
 /** The context's slices. A slice that is not listed here does not run. */
-export const toolstore = (eventProcessor: (name: string) => EventProcessor) => [
+export const toolstore = (
+  eventProcessor: (name: string) => EventProcessor,
+  deadLettering: (processor: EventProcessor, sequence: Sequence) => EventProcessor,
+) => [
   addTool(),
   registerCustomer(),
   rentTool(),
   inventory(eventProcessor),
-  sendReceipt(receipts, eventProcessor),
+  sendReceipt(receipts, eventProcessor, deadLettering),
 ]

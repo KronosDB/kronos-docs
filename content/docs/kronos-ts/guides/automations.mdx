@@ -84,12 +84,16 @@ An event handler can be run again for the same event: a failed batch is retried,
 
 ## Give the automation its processor
 
-The slice's `index.ts` takes the client and `eventProcessor`, declares the processor and returns its handlers. The processor is named for what it does. Renaming it would start it from the beginning of the log and send a receipt for every rental again:
+The slice's `index.ts` takes the client, `eventProcessor` and `deadLettering`, declares the processor and returns its handlers. The processor is named for what it does. Renaming it would start it from the beginning of the log and send a receipt for every rental again:
 
 ```ts
-export const sendReceipt = (receipts: Receipts, eventProcessor: (name: string) => EventProcessor) => {
+export const sendReceipt = (
+  receipts: Receipts,
+  eventProcessor: (name: string) => EventProcessor,
+  deadLettering: (processor: EventProcessor, sequence: Sequence) => EventProcessor,
+) => {
   // Named for what it does. A new name would send a receipt for every rental in the log again.
-  const processor = concurrent(batched(eventProcessor("send-receipt"), 100), byCustomer)
+  const processor = deadLettering(concurrent(batched(eventProcessor("send-receipt"), 100), byCustomer), byCustomer)
   return {
     commandHandlers: [handle(receipts)],
     queryHandlers: [],
@@ -98,7 +102,9 @@ export const sendReceipt = (receipts: Receipts, eventProcessor: (name: string) =
 }
 ```
 
-`concurrent` sends the receipts of different customers side by side and keeps each customer's rentals in order, as described under [Sequences](/docs/kronos-ts/event-processors#sequences). For a failing call to park the rental instead of holding up the processor, add `deadLettering` with the same sequence function, as described under [Dead letters](/docs/kronos-ts/event-processors#dead-letters).
+`concurrent` sends the receipts of different customers side by side and keeps each customer's rentals in order, as described under [Sequences](/docs/kronos-ts/event-processors#sequences). `deadLettering` parks a rental whose receipt keeps failing, so it holds up only that customer's later rentals instead of the whole processor, as described under [Dead letters](/docs/kronos-ts/event-processors#dead-letters). It is given the same sequence function as `concurrent`.
+
+Like `eventProcessor`, the `deadLettering` the slice receives is Kronos's `deadLettering` with part of it applied in `main.ts`: the dead-letter queue, which belongs to the whole application. The slice gives it only what is its own, the processor and its sequences, and never receives the queue. A slice whose processor does not park failures does not take `deadLettering`.
 
 ## Wire the client in the context
 
@@ -108,10 +114,21 @@ The context builds the client once and passes it to every slice that uses it. Un
 const receipts: Receipts = { send: async () => {} }
 ```
 
-The slice is then one more line in the context's list:
+The context takes `deadLettering` beside `eventProcessor` and passes it on, and the slice is one more line in its list:
 
 ```ts
-sendReceipt(receipts, eventProcessor),
+sendReceipt(receipts, eventProcessor, deadLettering),
+```
+
+`main.ts` writes the function anonymously, as it does `eventProcessor`, by applying Kronos's `deadLettering` to the application's dead-letter queue, here the one in Postgres:
+
+```ts
+const handlers = [
+  ...toolstore(
+    (name) => eventProcessor(name, eventStore, postgresTokenStore(pg), postgresUnitOfWork(unitOfWork, pg)),
+    (processor, sequence) => deadLettering(processor, postgresDeadLetterQueue(pg), sequence),
+  ),
+]
 ```
 
 The automation sends the command as itself. When `main.ts` adds `correlatingHandler` to the wrappers every handler shares, the command carries the correlation of the rental that caused it, so a trace or a log line leads from the receipt back to the request that rented the tool. [Interception and validation](/docs/kronos-ts/interception-and-validation) and [Observability](/docs/kronos-ts/observability) describe correlation and logging. Log through `ctx.log` only what the events do not record, such as the outcome of the call.
