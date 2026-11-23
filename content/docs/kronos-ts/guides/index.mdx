@@ -15,7 +15,7 @@ Building the application:
 - [Organize an app into slices](/docs/kronos-ts/guides/slices): one folder per feature, and the composition in `main.ts`.
 - [Refuse a command](/docs/kronos-ts/guides/refusing-a-command): refusals as results, and commands sent twice.
 - [Test a slice](/docs/kronos-ts/guides/testing-a-slice): one test per scenario, against the same wrappers as production.
-- [Write an automation](/docs/kronos-ts/guides/automations): react to an event and call another system, once.
+- [Write an automation](/docs/kronos-ts/guides/automations): stateless and stateful automations, and calls to another system.
 
 Read models:
 - [Project into your own tables](/docs/kronos-ts/guides/projecting-into-tables): a table written in the processor's transaction.
@@ -45,7 +45,7 @@ Messages and decisions:
 - A business refusal is a result with a code and facts, and a command sent twice lands once, as [Refuse a command](/docs/kronos-ts/guides/refusing-a-command) describes.
 
 Outside the system:
-- Another system is called from a command's handler, with an idempotency key, never from an event handler, as [Write an automation](/docs/kronos-ts/guides/automations) describes.
+- A stateless automation acts on the event alone, and a stateful one loads a state folded from several events. Another system is called with an idempotency key, from the event handler when the call needs no record in the log, or from a command's handler that records it, as [Write an automation](/docs/kronos-ts/guides/automations) describes.
 - A projection writes only its own tables, as [Project into your own tables](/docs/kronos-ts/guides/projecting-into-tables) describes, and we recommend writing them with [Drizzle](/docs/kronos-ts/guides/drizzle).
 
 Tests:

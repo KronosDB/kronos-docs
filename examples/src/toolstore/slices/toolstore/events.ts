@@ -23,3 +23,8 @@ export const ReceiptSent = ns.event("ReceiptSent", {
   payload: z.object({ toolId: z.string(), customerId: z.string() }),
   tags: { toolId: (payload) => payload.toolId, customerId: (payload) => payload.customerId },
 })
+
+export const ServiceRequested = ns.event("ServiceRequested", {
+  payload: z.object({ toolId: z.string() }),
+  tags: { toolId: (payload) => payload.toolId },
+})
