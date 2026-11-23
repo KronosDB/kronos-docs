@@ -1,15 +1,15 @@
 ---
 title: Run on KronosDB
-description: Start a KronosDB server, declare a context for the tool store, and connect a Kronos application to it for events, commands and queries.
+description: Start a KronosDB server, declare a context for the tool store, and build the app's event store and buses over it while the read models stay in Postgres.
 ---
 
-By the end of this guide a KronosDB server holds the tool store's events in a context named `toolstore`, and the application's command bus and query bus send their messages through that server. You need Docker to run the server, and an application that runs on the in-memory stores, such as the one in [Getting started](/docs/kronos-ts/getting-started). KronosDB 0.12 or later is required, because the client uses KronosDB's native protocol.
+When you are done, a KronosDB server holds the tool store's events in a context named `toolstore`, and the app's commands and queries go through that server, so they reach every instance of the app. The read models and the processors' positions stay in Postgres. You need Docker to run the server, and the tool store from [Run on Postgres](/docs/kronos-ts/guides/running-on-postgres). KronosDB 0.12 or later is required, because the client uses KronosDB's native protocol.
 
-The application is the tool store from the overview: `AddTool`, `ToolAdded`, `GetInventory`, and a projection into a map, all declared in `toolstore.ts`. What changes is the assembly.
+The slices do not change. `main.ts` builds three things over KronosDB instead of Postgres: the event store, the command bus and the query bus.
 
 ## Start the server
 
-KronosDB listens on two ports. Port 50051 serves everything a Kronos application sends: events, commands and queries. Port 9240 is HTTP, for the admin console, health probes, the admin API and Prometheus metrics. The image keeps its data in the volume `/data`, so a local run needs the ports and a volume.
+KronosDB listens on two ports. Port 50051 serves everything a Kronos application sends: events, commands and queries. Port 9240 is HTTP, for the admin console, health probes, the admin API and Prometheus metrics. The image keeps its data in the volume `/data`.
 
 ```sh
 docker run -d --name kronosdb -p 50051:50051 -p 9240:9240 \
@@ -29,8 +29,7 @@ This server accepts every connection and logs a warning that authentication is d
 
 A **context** is one event log, and a KronosDB server holds as many as you declare. The server creates one called `default`; the tool store uses its own, so that its events are separate from other applications on the same server. The server reads the contexts to create from a manifest file, which is a TOML file with one table per context.
 
-```toml
-# kronosdb-manifest.toml
+```toml title="kronosdb-manifest.toml"
 [[contexts]]
 name = "toolstore"
 ```
@@ -49,15 +48,28 @@ A context can also be created from the admin console. [Contexts](/docs/kronosdb/
 
 ## Install the client
 
-`@kronos-ts/kronosdb` provides the connection, the event store and the two buses.
+`@kronos-ts/kronosdb` provides the connection, the event store and the two buses:
+
+<Tabs groupId="runtime" persist items={["Bun", "Node.js"]}>
+<Tab value="Bun">
 
 ```sh
-bun add @kronos-ts/core @kronos-ts/kronosdb zod
+bun add @kronos-ts/kronosdb
 ```
+
+</Tab>
+<Tab value="Node.js">
+
+```sh
+npm install @kronos-ts/kronosdb
+```
+
+</Tab>
+</Tabs>
 
 ## Connect
 
-`kronosDbConnection` takes the address of the server, the `context` to use by default, a `componentName` that identifies this application to the server, and the serializer for event and message payloads. Every store and bus you build from the connection shares it.
+`kronosDbConnection` takes the address of the server, the `context` to use by default, a `componentName` that identifies this application to the server, and the serializer for event and message payloads. The event store and both buses share the one connection.
 
 ```ts
 const kdb = await kronosDbConnection({
@@ -71,58 +83,61 @@ const kdb = await kronosDbConnection({
 
 When the server requires a token or TLS, the same options object takes `token` and `ssl`. [KronosDB](/docs/kronos-ts/infrastructure/kronosdb) lists every option.
 
-## Replace the event store and the buses
+## Build the event store and the buses
 
-The event store takes the connection and the name of the context. The two buses each wrap a local bus, and take the connection and the name of a bus. A **bus** in KronosDB is a namespace for commands and queries, independent of contexts, and the tool store gives both the same name, `toolstore`, as its context.
+The event store takes the connection and the name of the context. Each bus wraps a local bus, which runs the handlers of this instance, and takes the connection and the name of a bus. A **bus** in KronosDB is a namespace for commands and queries, independent of contexts, and the tool store gives its buses the same name as its context.
 
 ```ts
 const eventStore = kronosDbEventStore(kdb, "toolstore")
 const commandBus = kronosDbCommandBus(localCommandBus(unitOfWork), kdb, "toolstore")
-const queryBus = kronosDbQueryBus(localQueryBus(unitOfWork), kdb, "toolstore")
+const localQueries = localQueryBus(unitOfWork)
+const queryBus = localFirstQueryBus(kronosDbQueryBus(localQueries, kdb, "toolstore"), localQueries)
 ```
 
-A command sent from this application is always sent to the server first, even when this application handles it. [Split across processes](/docs/kronos-ts/guides/across-processes) shows how to handle local commands without the trip.
+[Split across processes](/docs/kronos-ts/guides/across-processes) describes local-first buses. Every command is sent to the server, even when this instance handles it. The server spreads commands over the instances that handle them, so with several instances each takes a share. Queries are handled locally first with `localFirstQueryBus`: every instance reads the same Postgres tables, so another instance would return the same rows after a round trip.
 
-The processor keeps its position in memory here, so after every restart it reads the log from the start and rebuilds the in-memory inventory. A projection that survives restarts needs a durable token store, and the [Postgres guide](/docs/kronos-ts/guides/running-on-postgres) provides one.
+## Compose the app
+
+The event store and the buses come from KronosDB. The processors' token store and unit of work come from Postgres as before, so a batch's table writes and its new position still commit in one Postgres transaction. Only what `main.ts` opens changes; the slices and the context do not:
 
 ```ts
-const inventoryView = eventProcessor("inventory-view", eventStore, inMemoryTokenStore(), unitOfWork)
+const handlers = [
+  ...toolstore((name) => eventProcessor(name, eventStore, postgresTokenStore(pg), postgresUnitOfWork(unitOfWork, pg))),
+]
 ```
 
-## Start the application
-
-Await `kdb.start()` after `kronos()`. It resolves once the server has acknowledged every handler, and from then on a command or query for them can be routed.
+The handlers are then passed to `kronos()` with the same wrappers as in [Organize an app into slices](/docs/kronos-ts/guides/slices#compose-in-maints), and the connection is started:
 
 ```ts
-const app = kronos({
-  commandHandlers: [{ ...addTool, eventStore, commandBus, queryBus }],
-  eventHandlers: [{ ...recordAddedTool, commandBus, queryBus, processor: inventoryView }],
-  queryHandlers: [{ ...getInventory, queryBus }],
-})
 await kdb.start()
 ```
 
-The rest of the script is the one from the overview. It sends two commands and reads the inventory. At shutdown, stop the application first, so that the processor and in-flight handlers finish, and then close the connection, which drains the buses and closes the socket.
+The command bus takes the plain `unitOfWork`, because a command's events are appended to KronosDB, not written in a Postgres transaction. Await `kdb.start()` after `kronos()`. It resolves once the server has acknowledged every handler, and from then on the server can route commands and queries to them.
+
+At shutdown, stop the app first, so that the processors and the running handlers finish. Then close the connection, which drains the buses and closes the socket, and close the pool last:
 
 ```ts
 await app.stop()
 await kdb.close()
+await pg.close()
 ```
 
-Remote administration is separate and optional. With `kronosDbControlPlane(kdb, app.processors)`, created before `kdb.start()`, the admin console can pause, start, split and merge this application's processors and shows their status.
+Remote administration is separate and optional. With `kronosDbControlPlane(kdb, toolstore.processors)`, created before `kdb.start()`, the admin console can pause, start, split and merge this application's processors and shows their status.
 
 ## Checking it works
 
-Run the script against the server:
+Run `main.ts` against the server and the database:
 
 ```sh
-bun run kronosdb.ts
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/toolstore bun run main.ts
 ```
 
-It prints the two tools:
-
 ```text title="Output"
-t-1  Cordless drill  available
+ada rents t-1: rented
+grace rents t-1: TOOL_UNAVAILABLE
+ada rents t-2: OVER_LIMIT
+linus rents t-2: CUSTOMER_UNKNOWN
+t-1  Cordless drill  rented
 t-2  Tile saw        available
 ```
 
@@ -133,13 +148,13 @@ curl -s http://localhost:9240/api/v1/contexts | jq -c '.[] | select(.name == "to
 ```
 
 ```text title="Output"
-{"name":"toolstore","head":2}
+{"name":"toolstore","head":5}
 ```
 
-Running the script a second time rejects `AddTool`, because the log already holds `ToolAdded` for `t-1`. If the context name is not one the server has, the processor logs a stream error that reads `context not found` followed by the name. Declare the context in the manifest and restart the application.
+If the context name is not one the server has, the processor logs a stream error that reads `context not found` followed by the name. Declare the context in the manifest and restart the application.
 
 ## Related
 
 - [KronosDB](/docs/kronos-ts/infrastructure/kronosdb) lists the connection options, the stores and the buses in `@kronos-ts/kronosdb`.
 - [Getting started with KronosDB](/docs/kronosdb/getting-started) runs the server on its own.
-- [Split across processes](/docs/kronos-ts/guides/across-processes) runs commands and queries between two applications through the server.
+- [Split across processes](/docs/kronos-ts/guides/across-processes) runs different slices in different processes through the server.

@@ -96,8 +96,8 @@ console.log("initial:", await watching.initialResult)
 
 <TypeTable
   type={{
-    serviceName: { type: "string", description: "Shared by every replica of the same deployment. Names the queues replicas compete on. Required." },
-    instanceId: { type: "string", description: "Unique per running process. Reply and subscription queue names are derived from it. Required." },
+    serviceName: { required: true, type: "string", description: "Shared by every replica of the same deployment. Names the queues replicas compete on." },
+    instanceId: { required: true, type: "string", description: "Unique per running process. Reply and subscription queue names are derived from it." },
     topology: { type: "{ prefix?: string }", default: '{ prefix: "kronos" }', description: "Prefix of every exchange and queue name." },
     retry: { type: "{ deadLetter?: boolean; deadLetterExchange?: string }", default: "{ deadLetter: true }", description: "Whether queues are attached to a dead-letter exchange, and its name (default <prefix>.dlx)." },
     limits: { type: "{ maxConcurrentHandlers?: number; maxPendingRequests?: number }", default: "128 and 1024", description: "Handlers running at once, and requests awaiting a reply. They apply to commands and queries separately. maxConcurrentHandlers must be below 65535." },

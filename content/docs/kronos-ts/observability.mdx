@@ -89,8 +89,13 @@ const logger = otlpLogger(exporter, { level: "info" })
 `otlpCommandBus` and `otlpQueryBus` wrap a bus and trace each dispatch. `otlpHandler` wraps a handler and traces each handling. The three together trace a message from the caller that sent it to the handler that ran it. A command handler's span nests under the span of its sender. An event handler's span starts a trace of its own with a link to the trace that produced the event, because a processor can deliver an event days after it was appended. `otlpQueryBus` traces `query` only, so a subscription query and its updates are not traced.
 
 ```ts
-// otlpHandler goes outermost: it stamps the traceparent that the others read.
-const traced = otlpHandler(loggingHandler(correlatingHandler(rentTool.handler), logger), exporter)
+// Innermost first. otlpHandler goes outermost: it stamps the traceparent that the others read.
+const traced = pipe(
+  rentTool.handler,
+  (next) => correlatingHandler(next),
+  (next) => loggingHandler(next, logger),
+  (next) => otlpHandler(next, exporter),
+)
 
 const app = kronos({
   commandHandlers: [{ ...rentTool, handler: traced, eventStore, commandBus, queryBus }],

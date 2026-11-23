@@ -84,8 +84,8 @@ Axon Server can pause and start the event processors of a connected client, spli
 
 <TypeTable
   type={{
-    componentName: { type: "string", description: "Name of this application, shown on the dashboard. Required." },
-    serializer: { type: "Serializer", description: "Encodes payloads for the wire. Required." },
+    componentName: { required: true, type: "string", description: "Name of this application, shown on the dashboard." },
+    serializer: { required: true, type: "Serializer", description: "Encodes payloads for the wire." },
     host: { type: "string", default: '"localhost"', description: "Host of the server." },
     port: { type: "number", default: "8124", description: "The server's gRPC port." },
     servers: { type: "string[]", description: 'Addresses as "host:port", for a cluster. Overrides host and port. The first is used at start; each reconnection attempt uses the next.' },

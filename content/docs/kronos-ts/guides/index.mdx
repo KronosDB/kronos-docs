@@ -1,0 +1,51 @@
+---
+title: Guides
+description: How we recommend building an application with Kronos, one task per guide, and where Kronos leaves the choice to you.
+---
+
+The guides show how we recommend building an application with Kronos. Each one does a single task the way we would, on the same tool store, so that together they make up our conventions. They are also the conventions the Kronos build kit for Eventmodelers generates code with, so an application written by hand and one generated from an event model look the same.
+
+## A recommendation, not a requirement
+
+Kronos is open by design. `kronos()` takes three lists of handlers, and every store, bus, processor and wrapper is a plain value that you build and attach yourself. Kronos has no notion of slices, folders or contexts. You can organize and configure an application however suits it: in one file, as in [Getting started](/docs/kronos-ts/getting-started), in modules of your own, or on another store or transport. The guides choose one way and explain why. The reference pages, under What is Kronos, describe what else each part allows.
+
+## The guides
+
+Building the application:
+- [Organize an app into slices](/docs/kronos-ts/guides/slices): one folder per feature, and the composition in `main.ts`.
+- [Refuse a command](/docs/kronos-ts/guides/refusing-a-command): refusals as results, and commands sent twice.
+- [Test a slice](/docs/kronos-ts/guides/testing-a-slice): one test per scenario, against the same wrappers as production.
+- [Write an automation](/docs/kronos-ts/guides/automations): react to an event and call another system, once.
+
+Read models:
+- [Project into your own tables](/docs/kronos-ts/guides/projecting-into-tables): a table written in the processor's transaction.
+- [Use Drizzle for typed tables](/docs/kronos-ts/guides/drizzle): the same table, checked by the compiler.
+- [Speed up a projection](/docs/kronos-ts/guides/optimizing-projections): batches, sequences and segments, with measurements.
+- [Replay a projection](/docs/kronos-ts/guides/replaying-a-projection): rebuild a table from the log.
+
+Running it:
+- [Run on Postgres](/docs/kronos-ts/guides/running-on-postgres): events, positions and tables in one database.
+- [Run on KronosDB](/docs/kronos-ts/guides/running-on-kronosdb): events and messages through a KronosDB server.
+- [Split across processes](/docs/kronos-ts/guides/across-processes): different slices in different processes.
+- [Change an event's shape](/docs/kronos-ts/guides/changing-an-event): upcast the events already in the log.
+
+## Conventions at a glance
+
+Each convention is explained, with its reasons, in the guide it links to.
+
+Layout and composition:
+- One folder per feature, and one file of events per context, as [Lay out the folders](/docs/kronos-ts/guides/slices#lay-out-the-folders) describes.
+- A slice's `index.ts` returns its handlers, and `main.ts` is the only place that opens the infrastructure, wraps every handler with the wrappers the whole app shares and gives each its event store and buses, as [Compose in `main.ts`](/docs/kronos-ts/guides/slices#compose-in-maints) describes.
+- A slice declares its own processor from the `eventProcessor` it is given, and names it for what it writes or does, as [Write a read model slice](/docs/kronos-ts/guides/slices#write-a-read-model-slice) describes.
+
+Messages and decisions:
+- An event's tags are decided when the event is added, for every state that will load it, as [Declare the events in one file](/docs/kronos-ts/guides/slices#declare-the-events-in-one-file) describes.
+- Constraints are declared in schemas, the caller mints the ids of what it creates, and a state holds facts, never placeholders, as [Write a command slice](/docs/kronos-ts/guides/slices#write-a-command-slice) describes.
+- A business refusal is a result with a code and facts, and a command sent twice lands once, as [Refuse a command](/docs/kronos-ts/guides/refusing-a-command) describes.
+
+Outside the system:
+- Another system is called from a command's handler, with an idempotency key, never from an event handler, as [Write an automation](/docs/kronos-ts/guides/automations) describes.
+- A projection writes only its own tables, as [Project into your own tables](/docs/kronos-ts/guides/projecting-into-tables) describes, and we recommend writing them with [Drizzle](/docs/kronos-ts/guides/drizzle).
+
+Tests:
+- A slice's test file runs one test per scenario, and each scenario uses ids of its own, as [Test a slice](/docs/kronos-ts/guides/testing-a-slice) describes.

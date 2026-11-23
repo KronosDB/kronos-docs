@@ -9,17 +9,17 @@ This page covers handlers, the context they receive, sending commands, and the b
 
 ## Command handlers
 
-`commandHandler(descriptor, handler)` pairs a command descriptor with the function that handles it. The function receives the command message and a context. The message has the payload type that the descriptor's schema produces. This handler adds a tool unless one with that id already exists:
+`commandHandler(descriptor, handler)` pairs a command descriptor with the function that handles it. The function receives the command message and a context. The message has the payload type that the descriptor's schema produces. This handler adds a tool, and appends nothing when a tool with that id is already added, so a command sent twice adds the tool once:
 
 ```ts
 export const addTool = commandHandler(AddTool, async ({ payload }, ctx) => {
   const rental = await ctx.load(Rental, { toolId: payload.toolId })
-  if (rental.exists) throw new Error(`tool ${payload.toolId} already exists`)
+  if (rental.exists) return
   ctx.append(ToolAdded, payload)
 })
 ```
 
-The handler loads the `Rental` state for the tool, which reads the events tagged with that `toolId`. It throws when the tool exists, and otherwise buffers a `ToolAdded` event. Nothing is written until the handler returns, and a handler that throws writes nothing.
+The handler loads the `Rental` state for the tool, which reads the events tagged with that `toolId`. It returns without appending when the tool exists, and otherwise buffers a `ToolAdded` event. Nothing is written until the handler returns, and a handler that throws writes nothing.
 
 `commandHandler` does not subscribe anything. You register the handler by spreading it into an entry of `kronos({ commandHandlers })` together with the event store and the buses it uses:
 
@@ -53,23 +53,25 @@ When the entry's event store supports scheduling, the context also has `schedule
 
 A command descriptor can declare a `result` schema. The handler then returns a value of that type, and the caller's `send` resolves to it. Without a `result`, the handler returns nothing and `send` resolves to `undefined`, typed as `unknown`.
 
-A business refusal that the caller can act on belongs in the result. `RentTool` declares a result that is either `{ rented: true }` or `{ rented: false, reason }`, and the handler returns the refusal instead of throwing:
+A business refusal that the caller can act on belongs in the result. `RentTool` declares a result that is either `{ ok: true }` or `{ ok: false }` with a `rejection` code and the facts behind it, and the handler returns the refusal instead of throwing:
 
 ```ts
 export const rentTool = commandHandler(RentTool, async ({ payload }, ctx) => {
   const rental = await ctx.load(Rental, { toolId: payload.toolId })
   const customer = await ctx.load(Customer, { customerId: payload.customerId })
 
-  if (!rental.exists || rental.heldBy !== undefined) return { rented: false, reason: "tool-unavailable" }
-  if (!customer.registered) return { rented: false, reason: "customer-unknown" }
-  if (customer.rentals >= customer.maxRentals) return { rented: false, reason: "over-limit" }
+  if (!rental.exists || rental.heldBy !== undefined) return { ok: false, rejection: "TOOL_UNAVAILABLE", toolId: payload.toolId }
+  if (!customer.registered) return { ok: false, rejection: "CUSTOMER_UNKNOWN", customerId: payload.customerId }
+  if (customer.rentals >= customer.maxRentals) {
+    return { ok: false, rejection: "OVER_LIMIT", customerId: payload.customerId, maxRentals: customer.maxRentals }
+  }
 
   ctx.append(ToolRented, payload)
-  return { rented: true }
+  return { ok: true }
 })
 ```
 
-A handler that returns a refusal has appended nothing, so no write happens. Literals in the return value keep their literal types, so `{ rented: false, reason: "over-limit" }` needs no `as const`.
+A handler that returns a refusal has appended nothing, so no write happens. Literals in the return value keep their literal types, so `{ ok: false, rejection: "OVER_LIMIT", customerId, maxRentals }` needs no `as const`.
 
 A thrown error is for what the caller can only retry or report: a bug, a broken invariant, or infrastructure failing. The error rejects the caller's `send` with the same error object, and no events are written. [Interception and validation](/docs/kronos-ts/interception-and-validation) covers turning thrown errors into responses at the edge.
 
@@ -88,8 +90,8 @@ console.log("refusal", JSON.stringify(refusal))
 ```
 
 ```text title="Output"
-outcome {"rented":true}
-refusal {"rented":false,"reason":"over-limit"}
+outcome {"ok":true}
+refusal {"ok":false,"rejection":"OVER_LIMIT","customerId":"ada","maxRentals":1}
 ```
 
 The optional `metadata` argument carries per-request data such as the acting user or a trace header, as described in [Messages](/docs/kronos-ts/messages#metadata).
@@ -102,7 +104,7 @@ export const rentTools = commandHandler(RentTools, async ({ payload }, ctx) => {
   const refused: string[] = []
   for (const toolId of payload.toolIds) {
     const outcome = await ctx.send(RentTool, { toolId, customerId: payload.customerId })
-    if (outcome.rented) rented.push(toolId)
+    if (outcome.ok) rented.push(toolId)
     else refused.push(toolId)
   }
   return { rented, refused }
@@ -157,7 +159,7 @@ for (const attempt of attempts) {
 ```
 
 ```text title="Output"
-fulfilled {"rented":true}
+fulfilled {"ok":true}
 conflict true
 ```
 

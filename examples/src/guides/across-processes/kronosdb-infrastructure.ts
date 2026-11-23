@@ -1,4 +1,5 @@
 import {
+  eventProcessor,
   jsonSerializer,
   localCommandBus,
   localFirstCommandBus,
@@ -6,15 +7,15 @@ import {
   localQueryBus,
   unitOfWork,
 } from "@kronos-ts/core"
-import {
-  kronosDbCommandBus,
-  kronosDbConnection,
-  kronosDbEventStore,
-  kronosDbQueryBus,
-} from "@kronos-ts/kronosdb"
-import type { Infrastructure } from "./infrastructure.js"
+import { kronosDbCommandBus, kronosDbConnection, kronosDbEventStore, kronosDbQueryBus } from "@kronos-ts/kronosdb"
+import { postgresPool, postgresTokenStore, postgresUnitOfWork } from "@kronos-ts/postgres"
+import { migrate } from "../../toolstore/migrations"
 
-export async function connect(componentName: string): Promise<Infrastructure> {
+export async function connect(componentName: string) {
+  const pg = postgresPool(process.env.DATABASE_URL ?? "postgresql://postgres:postgres@localhost:5432/toolstore")
+  await pg.start()
+  await migrate(pg)
+
   const kdb = await kronosDbConnection({
     host: process.env.KRONOSDB_HOST ?? "localhost",
     port: Number(process.env.KRONOSDB_PORT ?? 50051),
@@ -26,11 +27,19 @@ export async function connect(componentName: string): Promise<Infrastructure> {
   const localCommands = localCommandBus(unitOfWork)
   const localQueries = localQueryBus(unitOfWork)
 
+  const eventStore = kronosDbEventStore(kdb, "toolstore")
+
   return {
-    eventStore: kronosDbEventStore(kdb, "toolstore"),
+    eventStore,
     commandBus: localFirstCommandBus(kronosDbCommandBus(localCommands, kdb, "toolstore"), localCommands),
     queryBus: localFirstQueryBus(kronosDbQueryBus(localQueries, kdb, "toolstore"), localQueries),
+    eventProcessor: (name: string) =>
+      eventProcessor(name, eventStore, postgresTokenStore(pg), postgresUnitOfWork(unitOfWork, pg)),
+    pg,
     start: () => kdb.start(),
-    close: () => kdb.close(),
+    async close() {
+      await kdb.close()
+      await pg.close()
+    },
   }
 }

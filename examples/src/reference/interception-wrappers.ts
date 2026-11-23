@@ -11,6 +11,7 @@ import {
   withNamespace,
 } from "@kronos-ts/core"
 import { z } from "zod"
+import { pipe } from "../toolstore/pipe"
 
 const ns = withNamespace("toolstore")
 
@@ -59,8 +60,8 @@ const app = kronos({
   commandHandlers: [
     {
       ...returnTool,
-      // the last wrapper written is the first to run
-      handler: timedHandler(actorHandler(returnTool.handler)),
+      // innermost first: actorHandler supplies ctx.actor, and timedHandler runs around it
+      handler: pipe(returnTool.handler, actorHandler, timedHandler),
       eventStore: inMemoryEventStore(),
       commandBus,
       queryBus: localQueryBus(unitOfWork),

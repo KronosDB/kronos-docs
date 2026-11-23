@@ -1,0 +1,138 @@
+---
+title: Write an automation
+description: Send a receipt whenever a tool is rented, with an automation that reacts to the event and a command whose handler calls the receipts system, once per rental.
+---
+
+When you are done, the tool store sends a receipt for every rental. An automation reacts to `ToolRented` and sends a `SendReceipt` command, and the command's handler calls the receipts system and records `ReceiptSent`. A rental's receipt is sent once, even when the event is handled again or the command is sent twice. You need the slice layout from [Organize an app into slices](/docs/kronos-ts/guides/slices).
+
+An **automation** is an event handler that decides to do something and sends a command for it. It runs on a processor of its own, so it keeps its own position in the log, apart from the projections.
+
+## Declare the event and the command
+
+The event the slice records goes in the context's `events.ts` with the other events, tagged with both ids, because the slice's state will load it by both:
+
+```ts
+export const ReceiptSent = ns.event("ReceiptSent", {
+  payload: z.object({ toolId: z.string(), customerId: z.string() }),
+  tags: { toolId: (payload) => payload.toolId, customerId: (payload) => payload.customerId },
+})
+```
+
+The command goes in the slice's folder, `send-receipt`. It carries everything the call to the receipts system needs, so a second attempt sends exactly what the first did:
+
+```ts
+export const SendReceipt = ns.command("SendReceipt", {
+  payload: z.object({ toolId: z.string().min(1), customerId: z.string().min(1) }),
+  result: z.object({ ok: z.literal(true) }),
+})
+```
+
+## Record what has been done
+
+`state.ts` holds one fact: whether this rental's receipt has been sent. Both the automation and the command's handler load it:
+
+```ts
+export const Receipt = state({
+  id: { toolId: z.string(), customerId: z.string() },
+  tags: (id) => ({ toolId: id.toolId, customerId: id.customerId }),
+  evolve: [
+    (): { sent: boolean } => ({ sent: false }),
+    [ReceiptSent, () => ({ sent: true })],
+  ],
+})
+```
+
+## Call the outside system from the command's handler
+
+The call to another system is made by a command handler, never by an event handler. The command is the decision to send a receipt, so its handler calls the system first and appends the event that records it afterwards. A receipt is then never recorded as sent before the receipts system has it:
+
+```ts
+export const handle = (receipts: Receipts) =>
+  commandHandler(SendReceipt, async ({ payload }, ctx) => {
+    const receipt = await ctx.load(Receipt, payload)
+    if (receipt.sent) return { ok: true }
+    await receipts.send(payload, `receipt-${payload.toolId}-${payload.customerId}`)
+    ctx.append(ReceiptSent, payload)
+    return { ok: true }
+  })
+```
+
+The call can repeat: the process can stop after the call and before the append, or the append can fail its condition and the command be sent again. Send an idempotency key made from the command's own ids, so the receipts system ignores a second call for the same rental, and take everything the call needs from the payload, never from a clock or a random value. A receipt already recorded as sent returns `{ ok: true }` without calling anything.
+
+The handler takes the client as an argument. The slice declares what it needs from the receipts system as a type in its own folder, with only the call it makes:
+
+```ts
+export type Receipts = {
+  send(receipt: { toolId: string; customerId: string }, idempotencyKey: string): Promise<void>
+}
+```
+
+## React to the event
+
+`automation.ts` handles `ToolRented`. It loads the same state and, when the receipt has not been sent, sends the command, without calling the receipts system itself:
+
+```ts
+export const automation = [
+  eventHandler(ToolRented, async ({ payload }, ctx) => {
+    if ((await ctx.load(Receipt, payload)).sent) return
+    await ctx.send(SendReceipt, payload)
+  }),
+]
+```
+
+An event handler can be run again for the same event: a failed batch is retried, and a reset replays the log. Keeping the call in the command's handler, behind the state check and the idempotency key, is what makes that safe. A projection follows the same rule and never calls outside the system, as [Project into your own tables](/docs/kronos-ts/guides/projecting-into-tables) describes.
+
+## Give the automation its processor
+
+The slice's `index.ts` takes the client and `eventProcessor`, declares the processor and returns its handlers. The processor is named for what it does. Renaming it would start it from the beginning of the log and send a receipt for every rental again:
+
+```ts
+export const sendReceipt = (receipts: Receipts, eventProcessor: (name: string) => EventProcessor) => {
+  // Named for what it does. A new name would send a receipt for every rental in the log again.
+  const processor = concurrent(batched(eventProcessor("send-receipt"), 100), byCustomer)
+  return {
+    commandHandlers: [handle(receipts)],
+    queryHandlers: [],
+    eventHandlers: automation.map((handler) => ({ ...handler, processor })),
+  }
+}
+```
+
+`concurrent` sends the receipts of different customers side by side and keeps each customer's rentals in order, as described under [Sequences](/docs/kronos-ts/event-processors#sequences). For a failing call to park the rental instead of holding up the processor, add `deadLettering` with the same sequence function, as described under [Dead letters](/docs/kronos-ts/event-processors#dead-letters).
+
+## Wire the client in the context
+
+The context builds the client once and passes it to every slice that uses it. Until a real receipts system is chosen, a client that sends nothing keeps the application running:
+
+```ts
+const receipts: Receipts = { send: async () => {} }
+```
+
+The slice is then one more line in the context's list:
+
+```ts
+sendReceipt(receipts, eventProcessor),
+```
+
+The automation sends the command as itself. When `main.ts` adds `correlatingHandler` to the wrappers every handler shares, the command carries the correlation of the rental that caused it, so a trace or a log line leads from the receipt back to the request that rented the tool. [Interception and validation](/docs/kronos-ts/interception-and-validation) and [Observability](/docs/kronos-ts/observability) describe correlation and logging. Log through `ctx.log` only what the events do not record, such as the outcome of the call.
+
+## Checking it works
+
+The slice's tests pass a receipts client that records each call. The first scenario appends `ToolRented` and checks that the automation sent `SendReceipt`, that `ReceiptSent` was recorded, and that the client was called once with the rental's idempotency key. The others check that nothing is sent for a rental whose receipt was sent, and that the command sent again does not call the client:
+
+```sh
+bun test src/guides/automations
+```
+
+```text title="Output"
+ 3 pass
+ 0 fail
+ 2 expect() calls
+Ran 3 tests across 1 file.
+```
+
+## Related
+
+- [Event processors](/docs/kronos-ts/event-processors) describes processors, sequences, retries and dead letters.
+- [Refuse a command](/docs/kronos-ts/guides/refusing-a-command) describes a command sent twice.
+- [Test a slice](/docs/kronos-ts/guides/testing-a-slice) describes the fixture and its claims.

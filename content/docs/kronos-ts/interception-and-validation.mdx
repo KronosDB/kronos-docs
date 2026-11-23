@@ -95,7 +95,25 @@ export function timedHandler<H extends AnyHandler>(next: H) {
 }
 ```
 
-`H` is the whole function type, so the wrapped handler keeps the parameter types of the original. Wrappers compose by nesting. The one written last is outermost, and it runs first. Map over a list of handlers and replace `handler` before attaching the infrastructure to give every entry the same wrapper.
+`H` is the whole function type, so the wrapped handler keeps the parameter types of the original. Map over a list of handlers and replace `handler` before attaching the infrastructure to give every entry the same wrapper.
+
+Wrappers compose by nesting, so `timedHandler(actorHandler(handler))` runs `timedHandler` first, around `actorHandler`. Several wrappers read more easily as a list. `pipe` is a short function you keep in your application, not part of Kronos. It takes a value and wrappers, innermost first, and returns `second(first(value))`, with one overload per number of wrappers so that each wrapper can change the type:
+
+```ts
+export function pipe<A, B>(value: A, first: (value: A) => B): B
+export function pipe<A, B, C>(value: A, first: (value: A) => B, second: (value: B) => C): C
+// and so on, up to the longest list you use
+export function pipe(value: unknown, ...wrappers: ReadonlyArray<(value: unknown) => unknown>): unknown {
+  return wrappers.reduce((wrapped, wrapper) => wrapper(wrapped), value)
+}
+```
+
+With `pipe`, the wrappers of an entry are listed in the order they apply. A wrapper that takes more than the handler is written as an arrow, such as `(next) => loggingHandler(next, logger)`:
+
+```ts
+// innermost first: actorHandler supplies ctx.actor, and timedHandler runs around it
+handler: pipe(returnTool.handler, actorHandler, timedHandler),
+```
 
 Kronos ships several wrappers built this way. `correlatingHandler`, `loggingHandler` and `otlpHandler` are covered in [Observability](/docs/kronos-ts/observability), and `postgresHandler` is covered in [Postgres](/docs/kronos-ts/infrastructure/postgres).
 

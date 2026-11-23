@@ -1,0 +1,204 @@
+---
+title: Use Drizzle for typed tables
+description: Declare the inventory table with Drizzle, generate its migration, and give handlers a typed ctx.db on the processor's transaction, so the compiler checks every column from the table to the query's result.
+---
+
+When you are done, the inventory slice declares its table as a Drizzle schema, drizzle-kit generates the table's migration, and the slice's handlers read and write through `ctx.db`: a Drizzle client on the same transaction as `ctx.sql()`. A misspelled column, a value of the wrong type or a query result that is missing a field then fails to compile. You need the inventory slice from [Project into your own tables](/docs/kronos-ts/guides/projecting-into-tables), which writes the same table with plain SQL.
+
+Kronos has no Drizzle package. The client is ten lines of your own, in `drizzle.ts`, built on `ctx.sql()`, so your application chooses the Drizzle version and no Kronos package depends on it. We recommend it for the tables your projections write. The compiler checks every column and value against the table's schema, down to the query's result, and the handlers contain typed calls instead of SQL strings. Drizzle builds each statement in your process and sends it on the handling's own connection, one statement per call, as `ctx.sql()` does. Plain SQL through `ctx.sql()` keeps working beside it, in the same handler if you need both.
+
+## Install Drizzle
+
+Install Drizzle and, for development, drizzle-kit, which generates migrations from the schema:
+
+<Tabs groupId="runtime" persist items={["Bun", "Node.js"]}>
+<Tab value="Bun">
+
+```sh
+bun add drizzle-orm
+bun add -d drizzle-kit
+```
+
+</Tab>
+<Tab value="Node.js">
+
+```sh
+npm install drizzle-orm
+npm install -D drizzle-kit
+```
+
+</Tab>
+</Tabs>
+
+## Declare the table
+
+The table's schema replaces `table.ts` in the slice, as `schema.ts`. Each column has a name in TypeScript and a name in the database:
+
+```ts
+export const inventory = pgTable("inventory", {
+  toolId: text("tool_id").primaryKey(),
+  name: text("name").notNull(),
+  available: boolean("available").notNull(),
+})
+```
+
+Drizzle derives the row's type from the schema: `toolId` and `name` are strings and `available` is a boolean, and none of them can be null. Every query on `ctx.db` that names `inventory` is typed from this declaration.
+
+## Generate the migration
+
+`drizzle.config.ts` names the schema files drizzle-kit reads and the folder it writes migrations to. List every slice's `schema.ts`, or use a glob such as `./src/slices/**/schema.ts`:
+
+```ts
+export default defineConfig({
+  dialect: "postgresql",
+  schema: "./src/guides/drizzle/inventory/schema.ts",
+  out: "./src/guides/drizzle/migrations",
+})
+```
+
+Generate a migration whenever a schema changes, and commit what drizzle-kit writes:
+
+<Tabs groupId="runtime" persist items={["Bun", "Node.js"]}>
+<Tab value="Bun">
+
+```sh
+bunx drizzle-kit generate
+```
+
+</Tab>
+<Tab value="Node.js">
+
+```sh
+npx drizzle-kit generate
+```
+
+</Tab>
+</Tabs>
+
+The first migration creates the table:
+
+```sql title="migrations/0000_uneven_charles_xavier.sql"
+CREATE TABLE "inventory" (
+	"tool_id" text PRIMARY KEY NOT NULL,
+	"name" text NOT NULL,
+	"available" boolean NOT NULL
+);
+```
+
+A projection that gets a new table or column also needs its rows rebuilt from the log. Give its processor a new name, or replay it as in [Replay a projection](/docs/kronos-ts/guides/replaying-a-projection).
+
+## Apply the migrations at startup
+
+`main.ts` applies the migrations before it builds the event store, replacing `migrations.ts` and its list of statements. Drizzle's migrator records each migration it has applied in `drizzle.__drizzle_migrations`, so a restart applies only the new ones. It uses a connection of its own, which `main.ts` closes before the app starts:
+
+```ts
+const migrator = drizzle(databaseUrl)
+await migrate(migrator, { migrationsFolder: new URL("./migrations", import.meta.url).pathname })
+await migrator.$client.end()
+```
+
+The Kronos tables are still created by `pg.start()`, so the migrations drizzle-kit generates contain only your own tables.
+
+## Give handlers ctx.db
+
+`ctx.sql().unwrap()` returns the driver's own handle on the connection that runs the current transaction. With the `pg` driver that is a `PoolClient`, and Drizzle's `node-postgres` client takes it directly. `drizzle.ts` wraps a handler so that it receives the client as `ctx.db`:
+
+```ts
+export type DrizzleCapability = { readonly db: NodePgDatabase }
+
+export const drizzleHandler =
+  <H extends (message: any, context: any) => any>(next: H) =>
+  (message: Parameters<H>[0], context: Omit<Parameters<H>[1], "db"> & PostgresCapability): ReturnType<H> =>
+    next(message, { ...context, db: drizzle(context.sql().unwrap<PoolClient>()) })
+```
+
+In an event handler the transaction is the batch's, so every statement on `ctx.db` commits with the processor's position, exactly as statements on `ctx.sql()` do. Never call `ctx.db.transaction()`: the handling already runs in a transaction. With the `postgres` driver, unwrap a `Sql` and use `drizzle-orm/postgres-js` instead; the rest is the same.
+
+A handler that uses the client declares it in its context's type, as `ctx: EventHandlerContext & DrizzleCapability`.
+
+## Wrap in the slice
+
+The inventory slice's function wraps its own handlers with `drizzleHandler`. `main.ts` wraps every query and event handler with `postgresHandler`, outside the slice's own wrappers, so `ctx.sql()` is supplied before `drizzleHandler` unwraps it:
+
+```ts
+eventHandlers: projection.map((handler) => ({ ...handler, handler: pipe(handler.handler, drizzleHandler), processor })),
+```
+
+Nothing else changes: the slice function's arguments, the context and `main.ts` stay as they were. Slices that write plain SQL keep working beside it, because `ctx.sql()` is still there.
+
+## Write the table with ctx.db
+
+The projection writes the table through `ctx.db`. The insert and the update name columns of `inventory`, and their values are checked against the column types:
+
+```ts
+eventHandler(ToolAdded, async ({ payload }, ctx: EventHandlerContext & DrizzleCapability) => {
+  await ctx.db
+    .insert(inventory)
+    .values({ toolId: payload.toolId, name: payload.name, available: true })
+    .onConflictDoUpdate({ target: inventory.toolId, set: { name: payload.name } })
+}),
+eventHandler(ToolRented, async ({ payload }, ctx: EventHandlerContext & DrizzleCapability) => {
+  await ctx.db.update(inventory).set({ available: false }).where(eq(inventory.toolId, payload.toolId))
+}),
+```
+
+A misspelled column fails to compile. Writing `set({ availble: false })` reports this error, and a string in `available` fails the same way:
+
+```text title="Output"
+error TS2561: Object literal may only specify known properties, but 'availble' does not exist in type ...
+```
+
+The upsert and the assignment keep both handlers idempotent, as described under [Idempotency](/docs/kronos-ts/guides/projecting-into-tables#idempotency).
+
+## Read it with ctx.db
+
+The query handler selects the columns the query returns. Drizzle types the selected rows from the table, and the handler declares its return type as `InventoryRow[]`, the type of `GetInventory`'s result:
+
+```ts
+export const handle = queryHandler(GetInventory, async (_query, ctx: QueryHandlerContext & DrizzleCapability): Promise<InventoryRow[]> => {
+  return ctx.db
+    .select({ toolId: inventory.toolId, name: inventory.name, available: inventory.available })
+    .from(inventory)
+    .orderBy(asc(inventory.toolId))
+})
+```
+
+`query.ts` exports the type beside the schema, with `export type InventoryRow = z.infer<typeof InventoryRow>`. With the return type declared, a select that leaves out `name` fails to compile:
+
+```text title="Output"
+error TS2322: Type '{ toolId: string; available: boolean; }[]' is not assignable to type '{ toolId: string; name: string; available: boolean; }[]'.
+```
+
+Without the declared return type, the handler compiles, and `validatingHandler` rejects the result when the query runs, because it checks every query result against the query's `result` schema.
+
+## Checking it works
+
+Run `main.ts` against a database. It applies the migration, adds two tools, rents one, and prints the inventory:
+
+```sh
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/toolstore bun run main.ts
+```
+
+```text title="Output"
+t-1  Cordless drill  rented
+t-2  Tile saw        available
+```
+
+The migrator recorded the migration it applied, and running `main.ts` again applies nothing:
+
+```sh
+psql "$DATABASE_URL" -c 'select id, hash from drizzle.__drizzle_migrations'
+```
+
+```text title="Output"
+ id |                               hash
+----+------------------------------------------------------------------
+  1 | 34ec79503f174f3a493a8d4205c019b1b243298fb7adda5adf8f295998d71929
+(1 row)
+```
+
+## Related
+
+- [Project into your own tables](/docs/kronos-ts/guides/projecting-into-tables) writes the same table with plain SQL through `ctx.sql()`.
+- [Postgres](/docs/kronos-ts/infrastructure/postgres) describes `ctx.sql()`, `unwrap()` and the transaction a handler runs in.
+- [Interception and validation](/docs/kronos-ts/interception-and-validation) describes handler wrappers such as `drizzleHandler`.
