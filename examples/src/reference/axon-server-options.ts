@@ -3,7 +3,6 @@ import {
   axonServerCommandBus,
   axonServerConnection,
   axonServerQueryBus,
-  messageSizeValidator,
 } from "@kronos-ts/axon-server"
 
 export async function connectToCluster(token: string) {
@@ -24,7 +23,7 @@ export async function connectToCluster(token: string) {
     readTimeoutMs: 15_000,
     reconnectIntervalMs: 1_000,
     maxReconnectAttempts: 20,
-    busSubscriptionAckDelayMs: 1_000,
+    startTimeoutMs: 15_000,
     shutdownTimeoutMs: 10_000,
     platformService: {
       heartbeatIntervalMs: 2_500,
@@ -33,6 +32,7 @@ export async function connectToCluster(token: string) {
     resilience: {
       maxAttempts: 10,
       initialDelayMs: 200,
+      healthCheckThresholdMs: 2_000,
     },
   })
 }
@@ -56,10 +56,4 @@ export async function tuneBuses(token: string) {
     localQueries,
   )
   return { commandBus, queryBus }
-}
-
-export function checkSize(payload: Uint8Array) {
-  const validator = messageSizeValidator({ maxMessageSize: 2 * 1024 * 1024, warningThreshold: 0.5 })
-  validator.validate(payload, "RentTool")
-  return validator.maxSize
 }

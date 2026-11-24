@@ -24,7 +24,7 @@ A connection string uses the `pg` driver (node-postgres), so install `pg` in you
 
 ## Schema
 
-`start()` creates five tables with `CREATE TABLE IF NOT EXISTS`. Several instances can start together. A table that already exists is never altered, so you migrate an existing table yourself.
+`start()` creates five tables with `CREATE TABLE IF NOT EXISTS`. Each statement runs in its own transaction, after the transaction takes a transaction-scoped advisory lock, so several instances can start together and no lock stays held when a statement fails or the connection is lost. A table that already exists is never altered, so you migrate an existing table yourself.
 
 | Table | Default name | Holds |
 | --- | --- | --- |
@@ -38,7 +38,9 @@ Set other names once with the pool's `tableNames` option, and every store built 
 
 To create the tables with your own migration tool, pass `bootstrap: false` and run the DDL yourself. The pool then connects and creates nothing.
 
-The package exports one DDL builder per table and index, such as `buildEventsTableDDL(DEFAULT_TABLE_NAMES)`, and `bootstrapSchema(pool)` runs all of them.
+The package exports one DDL builder per table and index, such as `buildEventsTableDDL(DEFAULT_TABLE_NAMES)`, and `bootstrapSchema(pool)` runs all of them. It takes a `postgresPool` or an adapter, anything with a `transaction` method. A statement runs under the `statementTimeoutMs` of the adapter, which is off by default.
+
+An append inserts its events with one statement per 100 events, in the order given and inside the append's transaction. Appends to the same tag take that tag's advisory lock one after the other. Both commit unless the second one has a condition, and its condition finds the first one's event after its marker, which fails it with `AppendConditionError`.
 
 ## Compose the stores
 
@@ -163,19 +165,19 @@ When the handler runs inside `otlpHandler`, each statement on `ctx.sql()` is rec
 
 ## Options
 
-`postgresPool` takes these options after the connection string or adapter.
+`postgresPool` takes these options after a connection string. After an adapter it takes `bootstrap`, `tableNames` and `resilience`, and the two timeouts are set on the adapter.
 
 <TypeTable
   type={{
     bootstrap: { type: "boolean", description: "Create the tables during start().", default: "true" },
     tableNames: { type: "TableNames", description: "The names of the five tables. Set all five.", default: "kronos_events, kronos_snapshots, kronos_scheduled_events, kronos_token_entries, kronos_dead_letters" },
     resilience: { type: "Partial<ResilienceConfig>", description: "Retry policy for the connect and the table creation in start()." },
-    idleInTransactionTimeoutMs: { type: "number", description: "Postgres ends a session whose transaction stays idle this long. Zero disables it. Applies to a connection string only. Set it on the adapter otherwise.", default: "30000" },
-    statementTimeoutMs: { type: "number", description: "Postgres cancels a statement that runs this long. Zero disables it. Applies to a connection string only. Set it on the adapter otherwise.", default: "0" },
+    idleInTransactionTimeoutMs: { type: "number", description: "Postgres ends a session whose transaction stays idle this long. Zero disables it. Applies to a connection string only. Beside an adapter it is a compile error and `postgresPool` throws; set it on the adapter.", default: "30000" },
+    statementTimeoutMs: { type: "number", description: "Postgres cancels a statement that runs this long. Zero disables it. Applies to a connection string only. Beside an adapter it is a compile error and `postgresPool` throws; set it on the adapter.", default: "0" },
   }}
 />
 
-`start()` retries a failed connect with exponential backoff and throws the last error when the attempts run out. Set the policy with the pool's `resilience` option: `maxAttempts` (default 10), `initialDelayMs` (100), `maxDelayMs` (30000), `isRetryable` to give up at once on an error that retrying cannot fix, and `log`, called before each retry. The policy covers start-up only, so a later lost connection is an `unavailable` error.
+`start()` retries a failed connect with exponential backoff and throws the last error when the attempts run out. Set the policy with the pool's `resilience` option: `maxAttempts` (default 10), `initialDelayMs` (100), `maxDelayMs` (30000), `isRetryable` to give up at once on an error that retrying cannot fix, and `log`, called before each retry and writing to `console.warn` when you give none. Pass `log: () => {}` to silence it. The policy covers start-up only, so a later lost connection is an `unavailable` error.
 
 `pgAdapter` takes `connectionString`, `poolConfig` (the `pg.Pool` options, such as `max`, with a default pool size of 10) and the two timeouts above. The other adapters take `connectionString` and the timeouts.
 
@@ -230,6 +232,7 @@ The scheduling worker's interval and batch size are set with `polling(store, ms)
 | `AppendConditionError` from an append, with `isConflict(error)` true | The events the command depended on changed, and nothing was written. Retry the command. A repeated event identifier fails the same way. |
 | An error marked `unavailable`, with `isUnavailable(error)` true | The server is unreachable, shutting down, out of connections, or a timeout fired. Retry later. |
 | `start()` throws the last connection error | The database was not reachable within the retry policy. Check the connection string and the server. |
+| `postgresPool: statementTimeoutMs cannot be set on a pool built from an adapter` | `idleInTransactionTimeoutMs` or `statementTimeoutMs` was passed beside an adapter. Set it on the adapter, as in `pgAdapter({ connectionString, statementTimeoutMs })`. |
 | `postgresPool: no connection yet` | A statement ran before `start()` resolved. Await `start()`. |
 | An error naming `postgresUnitOfWork` | A token store, dead-letter queue, schedule call or `postgresTransaction` got a unit of work without a Postgres transaction. Build the command bus and the processors from `postgresUnitOfWork`. |
 | `UnableToClaimTokenError` | Another node holds the processor segment, or this node lost its claim during a pause. The batch fails and the processor claims again. |

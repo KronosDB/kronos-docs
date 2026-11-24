@@ -18,6 +18,7 @@ export async function connectToCluster(token: string) {
     reconnectIntervalMs: 1_000,
     maxReconnectAttempts: 20,
     window: 4 * 1024 * 1024,
+    appendRetryMs: 60_000,
     startTimeoutMs: 15_000,
     shutdownTimeoutMs: 10_000,
     platformService: {

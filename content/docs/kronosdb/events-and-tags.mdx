@@ -1,6 +1,6 @@
 ---
 title: Events and tags
-description: Events, tags and positions, reading by query, streaming from a position, what a conditional append guarantees, when an append is acknowledged and the size limits.
+description: Events, tags and positions, reading by query, streaming from a position, what a conditional append guarantees, when an append is acknowledged, how an append is sent again and the size limits.
 ---
 
 The event store is a context's append-only log of events. Every event gets a position when it is appended, carries tags, and is read back by queries over its type and tags. A decision's consistency boundary is the set of events it depends on, selected by such a query, and a conditional append stores the decision's events only if that set is unchanged. [Contexts](/docs/kronosdb/contexts) describe how one server holds several logs.
@@ -14,7 +14,7 @@ An event has a type, a payload, tags and some descriptive fields. The client lib
 | `name` | The event type, such as `ToolRented`. Queries match on it. |
 | `tags` | The key and value pairs the event is indexed by. |
 | `payload` | The event's data, as bytes. |
-| `identifier` | A unique id for the event. The server stores it and does not check it for uniqueness. |
+| `identifier` | A unique id for the event. The server stores it and does not check it for uniqueness. It is how the server recognises an [append that is sent again](#retrying-an-append), so a client sets one on every event. |
 | `version` | The revision of the payload's serialized form. The server stores it. |
 | `timestamp` | When the event happened, in milliseconds since the Unix epoch. The server stores what it is given. |
 | `metadata` | Text key and value pairs, such as a correlation id. Not indexed and not queryable. |
@@ -74,7 +74,7 @@ An append without a condition always writes. An append whose condition has an em
 
 A failed condition is a result, not an error. The server returns an append conflict carrying the position of the first matching event at or after the marker, and writes nothing. A client reads the criteria again, decides again with the events it missed, and appends again with the new marker. The conflicting position locates the first change the client missed, so a client can read only the events from that position when it can reuse its earlier state.
 
-A conflict is also the result of a retry whose first attempt was already written. When a connection drops before the response arrives and the client sends the same append with the same condition, the events the first attempt wrote carry the tags the condition names, so the retry conflicts and the client reads to find its own events. This makes a conditional append safe to retry when its events match its own criteria, which is normally the case for an event that records a decision about the tags it read. An append without a condition is not safe to retry that way, and neither is one whose events fall outside its criteria. The server does not deduplicate by event `identifier`.
+An append that is sent again after its first attempt was written is not a conflict, because the server recognises the events and returns their positions, as [Retrying an append](#retrying-an-append) describes.
 
 ### Batches
 
@@ -96,9 +96,26 @@ On a single node an append is acknowledged when its events are fsynced. In a clu
 
 `auto` is the default. At startup the server times 100 small writes with `fdatasync`. When the 99th-percentile time is under 1 ms a cluster uses durable acknowledgements, and on a slower disk or one it could not measure it uses written acknowledgements. A written acknowledgement has one failure case: a hard failure of a majority of the voters at the same moment loses the events that were being synced.
 
+An append waits for its confirmation for at most the append deadline, `[timeouts] append`, which is 20 seconds by default. An append that is not confirmed by then fails with `unavailable`, for example while a majority of the voters is unreachable, and its events may still end up in the log. A node also holds at most `max-pending-append-bytes` of waiting appends, 256 MiB by default, and refuses an append that would take it past that with `unavailable` before anything is written. Both are safe to follow with the same append again, as the next section describes.
+
 Appends that arrive while another is being synced share one fsync. `group-commit-ms` adds a waiting window in milliseconds, 0 by default, which raises throughput at the price of latency.
 
 If a group commit fails, for example because an fsync fails or the commit thread panics, the server cannot make the written events durable, so it stops accepting appends. Pending and later appends fail with `internal` and a message that the event store is poisoned, until the server is restarted. The metric `kronosdb_engine_poisoned` reports the state, and [Monitor a server](/docs/kronosdb/monitoring#set-alerts) shows the alert.
+
+## Retrying an append
+
+An append that fails with `unavailable`, or whose connection is lost before the response, has an outcome the client cannot determine: the events may have been written, or may not. The client sends the same append again, with the same events, the same identifiers and in the same order, until the server responds. A node that holds those events at the end of its log returns the positions they already have and writes nothing, so an append is never written twice. The node checks for a retry before it checks the append's condition, so a conditional append that was committed is not refused by its own events. A conflict still means that another event matching the condition was stored.
+
+`unavailable` covers two cases that a client treats alike. The append was refused before anything was written, because an election is running, a limit was reached or a node could not be reached, or it was written and not confirmed in time, because leadership was lost or the append deadline passed. [`@kronos-ts/kronosdb`](/docs/kronos-ts/infrastructure/kronosdb#sending-an-append-again) and the Java connector send the append again themselves, so an application meets `unavailable` only when the server stayed unreachable for the client's retry time.
+
+A client requests retry-safe appends in its handshake, and the server grants them unless `retry-window-events` is 0. A client that was not granted them reports the failure and does not send the append again, because that server would write the events a second time. These limits apply to what the server recognises:
+
+- Only the newest events of a context are recognised, 1,200,000 by default. A retry of an older append is written again.
+- After a restart a node recognises only the events in its open segment. A new leader recognises a retry when it holds the events of the first attempt.
+- An event without an identifier is never recognised.
+- The same identifier with other content is another event, so a client keeps the events it built and sends those again instead of building them again.
+
+The window costs memory on every node: about 58 bytes an event, which is 66 MiB per context at the default once it is full. `retry-window-events` sets its size, and `kronosdb_retried_appends_total` counts the appends the node recognised.
 
 ## Snapshots and schedules
 
@@ -113,14 +130,17 @@ A schedule makes the server append an event at its due time. A client schedules 
 | `ack-mode` | `[storage]`, `--ack-mode`, `KRONOSDB_ACK_MODE` | `auto` | What an acknowledgement waits for: `auto`, `written` or `durable`. |
 | `group-commit-ms` | `--group-commit-ms`, `KRONOSDB_GROUP_COMMIT_MS` | `0` | Extra waiting window to share an fsync between appends, in milliseconds. |
 | `max-snapshot-size` | `[storage]` | 4 MiB | Largest snapshot a client may store. |
+| `retry-window-events` | `[storage]` | 1200000 | How many of a context's newest events the node recognises when an append is sent again. 0 turns it off. |
+| `append` | `[timeouts]`, `--append-timeout`, `KRONOSDB_APPEND_TIMEOUT` | 20 | Seconds an append may wait for its confirmation before it fails with `unavailable`. |
+| `max-pending-append-bytes` | `[limits]` | 256 MiB | Bytes of waiting appends a node holds. |
 
 ## Errors
 
 | Result | When | What to do |
 | --- | --- | --- |
 | Append conflict | An event matching the criteria exists at or after the marker. | Read again, decide again and append with the new marker. |
-| `unavailable` | The node is starting, an election is running, or the leader cannot be reached. | Retry. Nothing was written. |
-| `unavailable`, outcome unknown | Leadership was lost before the append was acknowledged. The events may have been committed by a majority or discarded by the next leader. | Retry the append with its condition: a conflict means the first attempt was committed, and an acknowledgement means it was not and has now been written. |
+| `unavailable` | The node is starting, an election is running, the leader cannot be reached, or a connection, stream or waiting-append limit is reached. Nothing was written. | Send the same append again. |
+| `unavailable`, outcome unknown | Leadership was lost before the append was acknowledged, or the append deadline passed. The events may have been committed by a majority or discarded by the next leader. | Send the same append again, with the same events and identifiers. The response carries the positions the events have, whether the first attempt was committed or this one wrote them. An event without an identifier cannot be recognised. |
 | `invalid_argument` | A record is malformed or not valid UTF-8, a type or tag key starts with `$`, or a snapshot is over the size limit. | Fix the request. Retrying does not help. |
 | `permission_denied` | The principal lacks the `read` role, for reads, or `write`, for appends, on the context. | Check the credentials and grants. |
 | `not_found` | The context does not exist. | Create the context or fix its name. |

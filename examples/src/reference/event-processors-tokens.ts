@@ -1,6 +1,5 @@
 import {
   FIRST_TOKEN,
-  LATEST_TOKEN,
   advanceToken,
   deserializeToken,
   emptyMetadata,
@@ -36,7 +35,6 @@ const afterThree = globalSequenceToken(3n)
 console.log(afterThree.position(), afterThree.covers(FIRST_TOKEN), FIRST_TOKEN.covers(afterThree))
 console.log(afterThree.lowerBound(globalSequenceToken(1n)).position())
 console.log(afterThree.upperBound(globalSequenceToken(9n)).position())
-console.log(LATEST_TOKEN.kind, LATEST_TOKEN.covers(afterThree))
 
 // A replay token wraps the progress of a replay and where the processor had got to
 const midReplay = replayToken(globalSequenceToken(10n), globalSequenceToken(4n))

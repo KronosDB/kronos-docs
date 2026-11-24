@@ -22,7 +22,7 @@ const axon = await axonServerConnection({
 })
 ```
 
-`componentName` is the application name shown on the Axon Server dashboard, and `serializer` encodes every payload this client sends.
+`componentName` is the application name shown on the Axon Server dashboard, and `serializer` encodes every payload this client sends. The call returns once the gRPC channel is ready. When the channel is not ready within `resilience.healthCheckThresholdMs` (5000 by default), it writes one warning through `resilience.log` and returns the handle anyway, and the channel keeps trying to connect.
 
 ## Composition
 
@@ -44,10 +44,10 @@ const app = kronos({
 })
 
 await axon.start()
-const control = await axonServerControlPlane(axon, app.processors.values() as Iterable<ManagedEventProcessor>)
+const control = await axonServerControlPlane(axon, app.processors)
 ```
 
-`axon.start()` has to run after `kronos()`, because `kronos()` subscribes the handlers and each subscription registers the handler with the server. It then waits `busSubscriptionAckDelayMs` for the server to register them. The wait is a fixed delay, because the client cannot detect when Axon Server has registered a subscription. `app.processors` is typed as a map of unknown values, so passing `.values()` needs the cast shown. Processors added to the app after the control plane is created are not addressable from the dashboard.
+`axon.start()` has to run after `kronos()`, because `kronos()` subscribes the handlers and each subscription registers the handler with the server. `start()` then waits until Axon Server has acknowledged every handler subscription, and rejects when that takes longer than `startTimeoutMs` or when the server refuses a subscription. The control plane takes `app.processors` itself and reads it at every instruction and status report, so a processor added to the app later is reported to the dashboard and can be administered from it. Passing `app.processors.values()` works too, but copies the processors once, and processors added afterwards are not seen.
 
 | Function | Provides |
 | --- | --- |
@@ -64,7 +64,9 @@ A context is Axon Server's tenancy boundary. `axonServerEventStore(axon, "toolst
 
 ## Event store behaviour
 
-Events read back have empty `tags`, because Axon Server indexes tags when it stores an event but does not return them. Reading past the head of the log returns no events and is not an error.
+Events read back carry their `tags`. Axon Server's read responses do not hold them, so the store requests each event's tags with one extra call per event, at most 64 at a time. Measured against a local Axon Server 2025.2.5, reading 100 events with `source()` takes about 6 ms where it would take 1 ms without the tags, and a stream of 4 KB events drains at about 13,000 events a second where it would drain at 55,000. Tags come back in the server's order, which need not be the order they were appended in, and a read fails when an event's tags cannot be read. Reading past the head of the log returns no events and is not an error.
+
+A stream holds at most `readAhead` events ready for its reader, 1000 when the reader names none, and stops reading from the server while it is full. An event processor passes its replay batch size as `readAhead`, and a value that is not a positive integer throws a `RangeError`.
 
 If a gRPC read does not complete within `readTimeoutMs`, the client cancels and retries it once, and a second timeout fails with `ConnectionFailedError`. This guards against a Bun HTTP/2 client defect that intermittently loses the end of a response. Reads are idempotent, so repeating one is safe. Raise `readTimeoutMs` if a single read legitimately takes longer than 15 seconds.
 
@@ -72,13 +74,13 @@ A snapshot is a cache. When the snapshot service has no snapshot, or cannot be r
 
 ## Command and query buses
 
-A command's metadata can carry `processingInstructions` with a `routingKey`, a `priority` and a `timeoutMs`. Commands with the same routing key go to the same handler, a higher priority is processed first, and the server cancels a command that is not handled within `timeoutMs`. `loadFactor` is the relative share of routed commands this instance receives.
+A command's metadata can carry `processingInstructions` with a `routingKey`, a `priority` and a `timeoutMs`. Commands with the same routing key go to the same handler, and a command declaration has no routing key of its own, so pass the key in the metadata of `send` or `ctx.send`. A higher priority is processed first, and the server cancels a command that is not handled within `timeoutMs`. `loadFactor` is the relative share of routed commands this instance receives.
 
 `subscriptionQuery` returns the initial result, then the updates handlers emit with `ctx.emitUpdate`. `emitUpdate` runs after the unit of work commits, and not at all if it rolls back. A bus holds at most 1024 subscriptions it opened and 1024 it serves, and fails the excess with `UnavailableError`. A subscription is not a durable feed: it ends when the channel does, and the subscriber has to query and subscribe again. Use an event processor for changes that must not be missed.
 
 ## Control plane
 
-Axon Server can pause and start the event processors of a connected client, split, merge and release their segments, and show their status on the dashboard. `pause-processor` starts the processor's `stop()` and does not wait for it, so a processor can take a moment to stop after the dashboard reports the instruction as sent. An instruction for an unknown processor changes nothing. Segments are described on the [event processors page](/docs/kronos-ts/event-processors), and an instruction for one applies to that processor only.
+Axon Server can pause and start the event processors of a connected client, split, merge and release their segments, and show their status on the dashboard. `pause-processor` starts the processor's `stop()` and does not wait for it, so a processor can take a moment to stop after the dashboard reports the instruction as sent. An instruction for a processor the application does not have fails with `No event processor named "<name>" in this application`. The client logs that error and sends the server nothing, as it does for every instruction. Segments are described on the [event processors page](/docs/kronos-ts/event-processors), and an instruction for one applies to that processor only.
 
 ## Options
 
@@ -96,7 +98,8 @@ Axon Server can pause and start the event processors of a connected client, spli
     readTimeoutMs: { type: "number", default: "15000", description: "How long a read may take before it is cancelled and retried once." },
     reconnectIntervalMs: { type: "number", default: "2000", description: "Base delay between reconnection attempts. It doubles per attempt up to 30000." },
     maxReconnectAttempts: { type: "number", default: "0", description: "Attempts before reconnecting gives up. 0 retries without limit." },
-    busSubscriptionAckDelayMs: { type: "number", default: "1000", description: "How long start() waits for the server to register handler subscriptions." },
+    startTimeoutMs: { type: "number", default: "30000", description: "How long start() waits for the server to acknowledge this client's handler subscriptions." },
+    resilience: { type: "Partial<ResilienceConfig>", description: "Retry policy for connecting and reconnecting. healthCheckThresholdMs (default 5000) is how long opening the connection waits for the channel to be ready before it warns and continues. log (default console.warn) receives one line per retried attempt; pass () => {} to silence it." },
     shutdownTimeoutMs: { type: "number", default: "30000", description: "How long close() waits for in-flight messaging to drain before it closes the channel anyway." },
   }}
 />
@@ -156,6 +159,8 @@ if (error instanceof AxonServerError) return `axon:${error.errorCode}`
 | The connection is closing | `ShutdownInProgressError` (`isUnavailable`) | Stop dispatching. |
 | A handler on another instance threw anything else | `CommandExecutionError` or `QueryExecutionError` with the remote message | Report it. |
 | The token is missing or wrong | `AuthenticationError` | Fix the token. |
+| `axon.start()` found no acknowledgement of the handlers in time | `UnavailableError`, "Handler registration timed out after Nms" (`isUnavailable`) | Check that the server is reachable, or raise `startTimeoutMs`. |
+| The server refused a handler subscription | The server's error, as `AxonServerError` | Fix the registration the server names. |
 | A message exceeds the server's size limit | `AxonServerError` with `transient: false` | Send a smaller payload, or raise the server's limit. |
 
 A subscription query fails its update iterator with `UnavailableError` when the initial result takes longer than `timeoutMs`, when 1024 subscriptions are already open, or when the bus is shutting down.

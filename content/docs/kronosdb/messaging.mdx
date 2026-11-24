@@ -19,7 +19,7 @@ Access to a bus is granted by name in the same way as for contexts. A principal 
 
 A process registers its command and query handlers by message name, with the bus, the application's component name and its own client id. The component name is shared by all instances of an application, and the client id is unique to one instance. A command handler can register a load factor, the relative share of that command's traffic it takes.
 
-Registrations belong to the connection. When a handler's connection closes, everything it registered is removed, and a client that stops responding to heartbeats is removed after the heartbeat timeout, 15 seconds by default. A new registration from the same client on the same bus replaces the older one, which ends with `unavailable`.
+Registrations belong to the connection. When a handler's connection closes, everything it registered is removed. The server ends a client's handler streams when the client stops responding to heartbeats, after the heartbeat timeout of 15 seconds by default, and not when its platform stream closes, so a client that reopens its streams keeps its command and query handlers. A new registration from the same client on the same bus replaces the older one, which ends with `unavailable`.
 
 In a cluster, every node holds the registry of all handlers, so a sender can connect to any node and reach a handler connected to any other.
 

@@ -177,7 +177,7 @@ Any node accepts a client's append. A follower forwards it to the leader and ret
 
 ## Watch a failover
 
-When the leader stops, the remaining voters elect a new one. Appends return `unavailable` errors until it is ready to accept writes, and a client retries them. Reads and subscriptions keep working from each node's own log, up to the last position a majority has acknowledged. If a majority is lost, writes stall until it returns, and nothing is acknowledged that a majority does not hold. [Clustering and replication](/docs/kronosdb/replication) describes what a client experiences.
+When the leader stops, the remaining voters elect a new one. Appends return `unavailable` errors until it is ready to accept writes, and a client sends them again. With the default Raft timing a follower takes over from a leader that froze after at most about 12 seconds, and usually after a few. A client that sends appends again, such as [`@kronos-ts/kronosdb`](/docs/kronos-ts/infrastructure/kronosdb#sending-an-append-again) with its default of 30 seconds, rides through that without an error, and an append the old leader had written is not written twice. Reads and subscriptions keep working from each node's own log, up to the last position a majority has acknowledged. If a majority is lost, writes stall until it returns, and nothing is acknowledged that a majority does not hold. [Clustering and replication](/docs/kronosdb/replication) describes what a client experiences.
 
 Watch these signals, on `/metrics` of every node or through your Prometheus:
 

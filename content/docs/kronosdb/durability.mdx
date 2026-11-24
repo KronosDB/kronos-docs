@@ -22,6 +22,8 @@ When `fdatasync` returns, the disk has reported that the data is stored. Some di
 Replication is what protects acknowledged events from a single disk like this. In a cluster, an append is acknowledged only after a majority of voters have it, so one node that loses its last writes in a power failure loses no acknowledged event. When that node starts, it cuts off any incomplete record at the end of its log, and when it rejoins, the leader sends it the events it is missing. Replication does not help when a majority of voters lose power at the same moment, so place voters where they do not share a power supply, a rack or a zone. A single node depends on its own disk alone.
 
 
+An append that waits longer than the append deadline for its confirmation fails with `unavailable` and may still end up in the log. A client sends it again, and the server recognises the events and returns the positions they have, as [Events and tags](/docs/kronosdb/events-and-tags#retrying-an-append) describes. The deadline, `[timeouts] append`, is 20 seconds by default.
+
 If a commit wave cannot be made durable, for example because `fdatasync` fails or the commit thread stops, the server cannot make the written events durable, so it stops accepting appends. Pending and later appends fail with `internal` and a message that the event store is poisoned, and the node accepts appends again after a restart.
 
 ## Related

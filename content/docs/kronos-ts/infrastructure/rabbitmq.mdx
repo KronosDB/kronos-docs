@@ -144,7 +144,7 @@ if (error instanceof Error) return `${error.name}: ${error.message}`
 | What happened | What the caller receives | What to do |
 | --- | --- | --- |
 | No queue is bound for the message's name | `NoHandlerError` (`isNoHandler`), as soon as the broker returns the message | Check that the handling service called `rabbit.start()`. |
-| A queue exists, but nothing is consuming it | `UnavailableError`, "Command X timed out after Nms" (`isUnavailable`) | Start a consumer, or retry. The command may still run later. |
+| A queue is bound for the name, but no handler replies before the timeout | `UnavailableError`, "Command X timed out after Nms. A queue is bound for the name, and RabbitMQ does not report whether a handler is consuming it" (`isUnavailable`) | Start a consumer, or retry. RabbitMQ does not report to the caller whether a handler is consuming, so this is not `NoHandlerError`. The request expires in the queue, so a handler started later does not run it, and a handler that was consuming but slow may still have run it. |
 | A handler on another instance failed with a conflict | `AppendConditionError` (`isConflict`) | Load the state again and decide again. |
 | A handler on another instance failed with `unavailable`, or its handler limit was full | `UnavailableError` (`isUnavailable`) | Retry. |
 | A handler on another instance threw anything else | A plain `Error` with the remote name, message and stack | Report it. |

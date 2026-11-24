@@ -164,7 +164,7 @@ A step after a failed step does not run.
 
 ## Storylines
 
-A storyline checks one read model after each event of a sequence. It starts from a query and alternates `shows`, which dispatches the query and checks the result, with `after`, which appends events and waits for the processors to handle them. A storyline is awaited as it stands; it has no `then` to write.
+A storyline checks one read model after each event of a sequence. It starts from a query and alternates `shows`, which dispatches the query and checks the result, with `after`, which appends events and waits for the processors to handle them. A storyline is awaited as it stands, and it has `catch` and `finally` as well as `then`. It runs once, when it is first awaited or first given one of the three, and awaiting the same storyline again does not run it again. `shows` and `after` each return a new storyline, which runs on its own. A storyline is not a `Promise` instance, so pass `Promise.resolve(storyline)` to something that requires one, such as `expect(...).rejects` in Bun.
 
 ```ts
 await toolStoreFixture

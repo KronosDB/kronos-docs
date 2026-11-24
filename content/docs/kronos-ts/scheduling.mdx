@@ -83,7 +83,7 @@ A schedule outlives the process on the families that store it.
 
 ### In memory
 
-`inMemorySchedulingEventStore(store, options?)` fires each schedule from a timer in the process. A pending timer does not keep the process from exiting, so a script that schedules and then ends does not wait for the deadline. A cancel in a unit of work that later rolls back leaves the schedule cancelled, so the event does not fire; test cancel and roll back against Postgres.
+`inMemorySchedulingEventStore(store, options?)` fires each schedule from a timer in the process. A pending timer does not keep the process from exiting, so a script that schedules and then ends does not wait for the deadline. A cancel in a unit of work that later rolls back is undone: the schedule is pending again and its timer is armed for its fire time, or for now when that time passed while the task ran. A schedule made and cancelled in one failed unit of work is dropped, so a later cancel of its token returns `not-found`. A cancel stands when the unit of work fails in an `onAfterCommit` action, because the task has committed by then.
 
 The `clock` option returns the current time in milliseconds, and the example above passes a clock a week ahead so the deadline is due at once. A test calls `stopScheduling()` when it finishes so that no schedule fires into the next one.
 
