@@ -136,7 +136,21 @@ export const handle = commandHandler(RequestService, async ({ payload }, ctx) =>
 })
 ```
 
-The automation and the command share the state because the event that closes the work, `ServiceRequested`, is one of the facts the decision is folded from. A state is loaded by reading every event its tags match, here every rental of one tool. When a state would read more events with every load without bound, such as every rental in the store, keep the automation's list of work in a table of the slice's own instead, written as in [Project into your own tables](/docs/kronos-ts/guides/projecting-into-tables).
+The command's handler loads the same state as the automation, and that state includes `ServiceRequested`, the event the command appends. This records a request once even when the decision to send it is made twice at the same time, as the next section describes.
+
+A state is loaded by reading every event its tags match, here every rental of one tool. When a state would read more events with every load without bound, such as every rental in the store, keep the automation's list of work in a table of the slice's own instead, written as in [Project into your own tables](/docs/kronos-ts/guides/projecting-into-tables).
+
+## Handle a trigger twice at the same time
+
+The same rental can be handled twice at once. A node that stops renewing its claim, because it is frozen or cut off from the token store, loses its segments after the claim timeout. Another node takes them and handles the same events, while the first may still be running its handlers. Two rentals of one tool can also be handled at once when the processor puts them in different sequences. [Running on several nodes](/docs/kronos-ts/event-processors#running-on-several-nodes) describes segments and claims.
+
+Both handlings then send `RequestService`, and both handlers load `Wear` before either appends. The first append records `ServiceRequested`. The condition of the second append matches that event, so it fails with a conflict and writes nothing, as described under [Conflicts and retries](/docs/kronos-ts/commands#conflicts-and-retries). The automation's `send` rejects, its batch fails and is retried, and on the retry `Wear` holds the request, so nothing is sent. The same holds for any number of handlings, as long as the state the command loads includes the event the command appends. Each command runs in a unit of work of its own, so its condition comes only from what its own handler loads, and the automation's `ctx.load` does not carry over to it.
+
+The conflict protects the log, and does nothing for a call that the command's handler makes to another system. When one rental's receipt is handled twice at once, both handlers find the receipt unsent and both call `receipts.send` before either appends. The second append fails, but its call has already been made. Two measures keep the customer to one receipt:
+- The idempotency key is made from the rental's ids, the same on every attempt, so the receipts system ignores the second call.
+- The processor keeps every event about one rental in one sequence, so in normal running one node handles them, one after another, as the next section describes.
+
+A sequence does not prevent every repeat. A retried batch, a node that lost its claim during a call, and a replay all run a handler again for an event it handled before. A call from a command's handler needs a deterministic idempotency key in every case.
 
 ## Give each automation its processor
 
@@ -155,9 +169,11 @@ export const sendReceipt = (
 
 `concurrent` sends the receipts of different customers side by side and keeps each customer's rentals in order, as described under [Sequences](/docs/kronos-ts/event-processors#sequences). `deadLettering` parks a rental whose receipt keeps failing, so it holds up only that customer's later rentals instead of the whole processor, as described under [Dead letters](/docs/kronos-ts/event-processors#dead-letters). It is given the same sequence function as `concurrent`. The notifications slice builds its processor the same way.
 
+Sequence an automation by the id its command's state is keyed by, or by part of that id. The receipts' state is keyed by the rental's tool and customer, and `byCustomer` puts every rental of a customer in one sequence, so two handlings of one rental never run at once. A sequence by anything else, such as each event's own identifier, would let two events about the same rental run side by side, and on two nodes once the processor is segmented.
+
 Like `eventProcessor`, the `deadLettering` the slice receives is Kronos's `deadLettering` with part of it applied in `main.ts`: the dead-letter queue, which belongs to the whole application. The slice gives it only what is its own, the processor and its sequences, and never receives the queue.
 
-The service slice calls no outside system, so a failure there is a fault to fix rather than one to park. It runs the tools side by side without `deadLettering`, and takes only `eventProcessor`:
+The service slice calls no outside system. A failed batch, such as one whose `send` lost a conflict, is retried, so the count never skips a rental. The slice sequences rentals by the tool its state is keyed by, has no `deadLettering`, and takes only `eventProcessor`:
 
 ```ts
 export const requestService = (eventProcessor: (name: string) => EventProcessor) => {
