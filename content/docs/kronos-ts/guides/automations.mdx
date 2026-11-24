@@ -136,21 +136,17 @@ export const handle = commandHandler(RequestService, async ({ payload }, ctx) =>
 })
 ```
 
-The command's handler loads the same state as the automation, and that state includes `ServiceRequested`, the event the command appends. This records a request once even when the decision to send it is made twice at the same time, as the next section describes.
+The command's handler loads the same state as the automation, and that state includes `ServiceRequested`, the event the command appends. This is what makes a command sent again append nothing, as the next section describes.
 
 A state is loaded by reading every event its tags match, here every rental of one tool. When a state would read more events with every load without bound, such as every rental in the store, keep the automation's list of work in a table of the slice's own instead, written as in [Project into your own tables](/docs/kronos-ts/guides/projecting-into-tables).
 
-## Handle a trigger twice at the same time
+## Send the command more than once
 
-The same rental can be handled twice at once. A node that stops renewing its claim, because it is frozen or cut off from the token store, loses its segments after the claim timeout. Another node takes them and handles the same events, while the first may still be running its handlers. Two rentals of one tool can also be handled at once when the processor puts them in different sequences. [Running on several nodes](/docs/kronos-ts/event-processors#running-on-several-nodes) describes segments and claims.
+An automation sends its command again whenever its event is handled again: a failed batch is retried, and a replay runs the log again. The command sent again finds the event that the first one appended in its state, so it appends nothing. `Wear` holds `ServiceRequested`, and `Receipt` holds `ReceiptSent`. This is why a command's handler loads a state that includes the event it appends.
 
-Both handlings then send `RequestService`, and both handlers load `Wear` before either appends. The first append records `ServiceRequested`. The condition of the second append matches that event, so it fails with a conflict and writes nothing, as described under [Conflicts and retries](/docs/kronos-ts/commands#conflicts-and-retries). The automation's `send` rejects, its batch fails and is retried, and on the retry `Wear` holds the request, so nothing is sent. The same holds for any number of handlings, as long as the state the command loads includes the event the command appends. Each command runs in a unit of work of its own, so its condition comes only from what its own handler loads, and the automation's `ctx.load` does not carry over to it.
+The same state decides when two commands for one tool run at the same time, which happens when the processor puts two rentals of the tool in different sequences. Both handlers load `Wear` before either appends. The first append records `ServiceRequested`, and the condition of the second matches it, so the second fails with a conflict and writes nothing, as described under [Conflicts and retries](/docs/kronos-ts/commands#conflicts-and-retries). Each command runs in a unit of work of its own, so its condition comes only from what its own handler loads, and the automation's `ctx.load` does not carry over to it.
 
-The conflict protects the log, and does nothing for a call that the command's handler makes to another system. When one rental's receipt is handled twice at once, both handlers find the receipt unsent and both call `receipts.send` before either appends. The second append fails, but its call has already been made. Two measures keep the customer to one receipt:
-- The idempotency key is made from the rental's ids, the same on every attempt, so the receipts system ignores the second call.
-- The processor keeps every event about one rental in one sequence, so in normal running one node handles them, one after another, as the next section describes.
-
-A sequence does not prevent every repeat. A retried batch, a node that lost its claim during a call, and a replay all run a handler again for an event it handled before. A call from a command's handler needs a deterministic idempotency key in every case.
+The conflict protects the log, and does nothing for a call that the command's handler makes to another system. Two receipt commands for one rental at the same time would both call `receipts.send` before either appends. Sequencing the processor by the id the command's state is keyed by, as the next section describes, keeps the commands for one rental one after another. The idempotency key made from the rental's ids covers a call repeated after the process stopped between the call and the append.
 
 ## Give each automation its processor
 
