@@ -108,6 +108,8 @@ The wrapper uses `storedTypes` wherever the log is filtered by type: a processor
 
 Without `storedTypes`, the wrapper cannot translate a type filter, so it drops it. Reads and streams still return only the requested types, after upcasting, but they read every event that matches the tags. An append condition checks every event that carries its tags, whatever its type, so it can report conflicts that a type filter would have excluded. An upcast that changes only the version or the payload keeps the name, and `(type) => [type]` is the value to pass for it, which keeps the type filter.
 
+A store that returns events without their tags, as Axon Server does, leaves the wrapper only the type to narrow a read by. That is enough for a read whose query has one item, which is the query of most states. A state scoped by several tags, folding events that carry different ones of them, reads with a query whose items differ in tags and in types. Over such a store that read needs `storedTypes`; without it the read fails with an error that says so.
+
 ## Snapshots and read models
 
 A snapshot holds a state folded before the change, and the upcast does not convert it. If the upcast changes what an old event means to a state, change that snapshot's key, as described on [Snapshots](/docs/kronos-ts/snapshots).
