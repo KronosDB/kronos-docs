@@ -7,6 +7,5 @@ const pg = postgresPool(process.env.DATABASE_URL ?? "postgresql://postgres:postg
 // In main.ts, where the event store is built: every reader of the store gets the new shape.
 export const eventStore = upcastingEventStore(
   postgresSnapshottingEventStore(postgresEventStore(pg), pg, jsonSerializer()),
-  categoryAdded,
-  { storedTypes: (type) => [type] },
+  [categoryAdded],
 )

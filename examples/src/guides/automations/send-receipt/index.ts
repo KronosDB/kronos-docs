@@ -5,7 +5,7 @@ import type { Receipts } from "./receipts"
 
 /** The rentals of one customer stay in order; different customers' receipts are sent side by side. */
 const byCustomer = (event: EventMessage) =>
-  event.tags.find((tag) => tag.key === "customerId")?.value ?? event.identifier
+  (event.payload as { customerId?: string }).customerId ?? event.identifier
 
 export const sendReceipt = (receipts: Receipts, eventProcessor: (name: string) => EventProcessor) => {
   // Named for what it does. A new name would send a receipt for every rental in the log again.

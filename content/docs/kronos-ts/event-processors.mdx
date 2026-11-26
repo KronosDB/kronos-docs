@@ -64,8 +64,10 @@ const tuned = polling(batched(inventoryView, 200), 250)
 A **sequence** groups events that must be handled in order. It is a function from an event to a string, and events with the same string are always handled in log order. Events with different strings have no order between them. The usual choice is one sequence per tool, customer or other entity.
 
 ```ts
-const byToolId: Sequence = (event) => event.tags.find((entry) => entry.key === "toolId")?.value ?? event.identifier
+const byToolId: Sequence = (event) => (event.payload as { toolId?: string }).toolId ?? event.identifier
 ```
+
+An event carries no tags, so a sequence function reads the payload, as the function above does. An event with no tool id falls back to its own identifier and has a sequence of its own.
 
 A processor with none of `concurrent`, `deadLettering` or `segmented` handles one event at a time in log order, whatever its sequences. Each of the three takes the sequence function and uses it for something different. `concurrent` runs the sequences of a batch at the same time, each in log order. `deadLettering` parks a failed event and the later events of its sequence. `segmented` assigns each sequence to one segment. Pass the same function to all of them: a different second function throws at construction.
 
@@ -95,7 +97,7 @@ Parked events are not retried by Kronos. Your code calls `reprocessDeadLetters` 
 console.log(await processor.reprocessDeadLetters((sequenceId) => sequenceId === "linus"))
 ```
 
-A replay runs the event through every handler for its type, including handlers that already succeeded, so handlers must tolerate receiving an event twice.
+A letter records which handler failed in `diagnostics.handlerIndex`: the handler's position among the processor's handlers for the event, in the order `kronos()` was given them. A replay runs that handler and the ones after it, which never ran for the event because delivery stops at the first failure, and it does not run the handlers that already succeeded. A letter that was parked behind another was delivered to no handler, so a replay runs every handler for it. So does a letter with no recorded index, or with one past the end of the handlers, and those handlers must tolerate receiving an event twice. A replay that fails rolls back and the letter keeps its index. Adding, removing or reordering the handlers of one event in a processor while letters are parked changes what a recorded position means.
 
 `deadLetterBackoff(queue, policy)` wraps a queue so that a sequence that keeps failing is not replayed at once. The policy receives the number of attempts and the letter, and returns a delay in milliseconds or `"hold"`. A held sequence stays parked until `retryNow(processingGroup, sequenceIdentifier)` makes it due. `exponentialBackoff(options?)` is a ready policy. Backoff only delays: it never discards a letter.
 
@@ -175,7 +177,7 @@ A processor that cannot claim its segments, for example because the token store 
 | Claim failure | The token store fails while the processor claims its segments. | Logged and set as `status().error`. The claim is retried every half claim timeout until it succeeds. |
 | `UnableToClaimTokenError` | Another node holds a segment, or this node lost its claim. Test with `isUnableToClaimToken`. | A segment held elsewhere is skipped. A node that lost its claim fails its batch and stops handling the segment. |
 | `DeadLetterQueueOverflowError` | The queue is full when a letter is parked. | The batch is retried with backoff, so the processor stalls until the queue has room. |
-| Boot error from `kronos()` | An event handler has no `processor`, or two entries name one processor with different settings. | `kronos()` throws and names the entries. |
+| Boot error from `kronos()` | An event handler has no `processor`, two entries name one processor with different settings, or two entries subscribe one command or query on a bus. | `kronos()` throws and names the entries. Nothing was subscribed, so the same buses can be passed to `kronos()` again. |
 | Construction error | `batched`, `polling` or `segmented` receives an invalid value, or the sequence functions differ. | The wrapper throws. |
 | Reset error | `resetTokens` is called on a running processor, or another node holds a segment. | `resetTokens` throws, and nothing is rewound. |
 | Segment error | `splitSegment` on a processor without `segmented`, or on a segment that does not exist or is still catching up after a merge. | The method throws and the segment stays as it was. |

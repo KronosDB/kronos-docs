@@ -64,8 +64,7 @@ const deadLetters = postgresDeadLetterQueue(pg, { maxSequences: 256, maxSequence
 const commandBus = localCommandBus(uow)
 const queryBus = localQueryBus(unitOfWork)
 
-const byTool = (event: EventMessage) =>
-  event.tags.find((tag) => tag.key === "toolId")?.value ?? event.identifier
+const byTool = (event: EventMessage) => (event.payload as { toolId?: string }).toolId ?? event.identifier
 
 const inventoryView = deadLettering(
   batched(eventProcessor("inventory-view", eventStore, tokenStore, uow), 200),

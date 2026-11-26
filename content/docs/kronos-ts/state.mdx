@@ -51,7 +51,7 @@ export const Tool = state({
 
 `evolve` is one list. Its first element is the initial state, a function that returns the value the fold starts from. The remaining elements are pairs of an event descriptor and an evolver, a function that takes the state so far and an event message and returns the next state. The type of the state is inferred from the initial state, and each evolver is checked against its own event: in `[ToolAdded, (tool) => ...]` the message payload has the payload type of `ToolAdded`.
 
-The initial state may ignore the id or read it. Reading it is useful when the state carries its own key. An evolver receives the whole event message, so besides `payload` it can read `metadata`, `tags` and `timestamp`, and it may return a promise of the next state.
+The initial state may ignore the id or read it. Reading it is useful when the state carries its own key. An evolver receives the whole event message, so besides `payload` it can read `metadata` and `timestamp`, and it may return a promise of the next state.
 
 ```ts
 export const CustomerRentals = state({
@@ -96,7 +96,7 @@ An event the query returns that has no evolver is skipped. If two pairs name the
 
 A command handler loads a state with `ctx.load(state, id)`. The call reads the matching events from the event store attached to the handler's entry, folds them from the initial state, and returns the result. When no event matches, the result is the initial state. The read also becomes the condition of the handler's append: when the handler returns, its appended events are written only if no event matching what it loaded has been stored since.
 
-Within one command, loading the same state with the same id twice returns the first result without reading the store again, and ids are compared structurally, so key order does not matter. After `ctx.append`, the appended events are folded into every state already loaded in that command. A state that has not been loaded yet reads the store, which does not hold the appended events yet, so it does not include them. Event handlers have `ctx.load` as well, but only a command handler appends, so only a command handler's reads become a condition.
+Within one command, loading the same state with the same id twice returns the first result without reading the store again, and ids are compared structurally, so key order does not matter. A `ctx.load` after `ctx.append` includes the events that handler has appended, for every state whose query matches them, whether the state was first loaded before or after the append. A state whose query does not match an appended event does not receive it, so appending for one id leaves the state loaded for another id as it was. Event handlers have `ctx.load` as well, but only a command handler appends, so only a command handler's reads become a condition.
 
 ## A state over two ids
 

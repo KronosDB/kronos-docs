@@ -12,7 +12,7 @@ A setting resolves from the first source that provides it, in this order: comman
 The config file is TOML. `--config` (short form `-c`, environment variable `KRONOSDB_CONFIG`) names it. Without that setting the server reads `kronosdb.toml` in its working directory when the file exists. A file that cannot be parsed stops the server at startup, and so does a key the server does not accept, in any table. The error names the key, its table, its line and the file, and lists the keys that table accepts, so a misspelled `ack-mod` under `[storage]` fails with this message:
 
 ```text
-Error: "config file '/etc/kronosdb/kronosdb.toml' has an unknown key `ack-mod` in table [storage] (line 7). Fix its spelling or move it to the table it belongs to, or remove it. Keys accepted there: `segment-size`, `read-path`, `block-cache-bytes`, `block-size`, `readahead-blocks`, `index-merge-rate`, `ack-mode`, `max-snapshot-size`."
+Error: "config file '/etc/kronosdb/kronosdb.toml' has an unknown key `ack-mod` in table [storage] (line 7). Fix its spelling or move it to the table it belongs to, or remove it. Keys accepted there: `segment-size`, `read-path`, `block-cache-bytes`, `block-size`, `readahead-blocks`, `index-merge-rate`, `ack-mode`, `max-snapshot-size`, `retry-window-events`."
 ```
 
 An unknown table fails the same way and names the table it would sit in, so a `[backup]` table at the top of the file fails with ``unknown table `[backup]` at the top level (line 3)``.
@@ -56,7 +56,7 @@ token = "change-me"
 | `listen` | `--listen` | `KRONOSDB_LISTEN` | `127.0.0.1:50051` (`0.0.0.0:50051` in the image) | Address of the client and peer port. Clients, other nodes and the `kronos` CLI all connect here. |
 | `[admin] listen` | `--admin-listen` | `KRONOSDB_ADMIN_LISTEN` | `127.0.0.1:9240` (`0.0.0.0:9240` in the image) | Address of the admin HTTP port: console, JSON API, `/health`, `/ready` and `/metrics`. It has no TLS of its own. |
 
-TLS for the client port is configured under [Auth](#auth). A single request is limited to 16 MiB, and the server has no setting for it.
+TLS for the client port is configured under [Auth](#auth). A single request is limited to 16 MiB, and the server has no setting for it. Until it has accepted a client's first message, the server reads at most 64 KiB from that client, and it refuses a larger first message with `resource_exhausted`.
 
 ## Storage
 
@@ -69,6 +69,7 @@ TLS for the client port is configured under [Auth](#auth). A single request is l
 | `[storage] readahead-blocks` | `--readahead-blocks` | `KRONOSDB_READAHEAD_BLOCKS` | `16` | Blocks read ahead of a sequential reader. |
 | `[storage] index-merge-rate` | `--index-merge-rate` | `KRONOSDB_INDEX_MERGE_RATE` | `67108864` (64 MiB) | Bytes per second a background index merge may write. `0` means unlimited. |
 | `[storage] max-snapshot-size` | `--max-snapshot-size` | `KRONOSDB_MAX_SNAPSHOT_SIZE` | `4194304` (4 MiB) | Largest snapshot state a client may store. Snapshot records share the log with events, and a larger blob is rejected. |
+| `[storage] retry-window-events` | none | none | `1200000` | How many of a context's newest events the node recognises by identifier, so that an append a client sends again gets the positions the first attempt got instead of being written twice. `0` turns it off, and the node then grants no [retry-safe appends](/docs/kronosdb/events-and-tags#retrying-an-append). Each event in the window costs about 58 bytes of memory, which is 66 MiB per context at the default once the window is full. |
 
 The block cache budget should stay well under half of the memory the node has, because reads also use the operating system's page cache. The startup hardware check reports a `low_memory` finding when the budget exceeds half.
 
@@ -178,9 +179,17 @@ What the archive does and does not give you is described in [Back up and restore
 | --- | --- | --- | --- | --- |
 | `[timeouts] command` | `--command-timeout` | `KRONOSDB_COMMAND_TIMEOUT` | `30` | Seconds a dispatched command may take. The server also cancels an in-flight command that has not completed after twice this value. |
 | `[timeouts] query` | `--query-timeout` | `KRONOSDB_QUERY_TIMEOUT` | `30` | Seconds a dispatched query may take. |
+| `[timeouts] append` | `--append-timeout` | `KRONOSDB_APPEND_TIMEOUT` | `20` | Seconds an append may wait to be confirmed as committed. After that the server responds with `unavailable`, and the events may still end up in the log. At least `1`. |
 | `[timeouts] heartbeat-interval` | `--heartbeat-interval` | `KRONOSDB_HEARTBEAT_INTERVAL` | `5` | Seconds between the heartbeats the server sends on each client's platform stream. |
 | `[timeouts] heartbeat-timeout` | `--heartbeat-timeout` | `KRONOSDB_HEARTBEAT_TIMEOUT` | `15` | Seconds without a heartbeat after which a client is dropped from its buses and the routing table. |
 | `[messaging] permit-wait` | none | none | `true` | When a command handler has no flow-control permits left, wait for one, bounded by the command timeout. `false` fails the command at once. |
+
+| `[limits] max-handshakes` | none | none | `1024` | Connections that are still in their TLS and Hello handshake. At least `1`. |
+| `[limits] max-connections` | none | none | `10000` | Client connections past their handshake. At least `1`. |
+| `[limits] max-streams-per-connection` | none | none | `10000` | Requests open at once on one connection. At least `1`. |
+| `[limits] max-pending-append-bytes` | none | none | `268435456` (256 MiB) | Bytes of appends this node holds while they wait to be committed. One append alone is always accepted. At least `1`. |
+
+A connection past `max-handshakes` is closed as soon as it is accepted. A client connection past `max-connections` is refused with `unavailable` instead of a welcome, and a request past `max-streams-per-connection` is refused with `unavailable` on its own stream while the connection stays open. An append that would take the bytes of waiting appends past `max-pending-append-bytes` is refused with `unavailable` before anything is written. Nothing was done in any of these cases, so the client can send the request again once there is room. Cluster peers are not counted in the first three limits, and every limit applies to one node. [Monitor a server](/docs/kronosdb/monitoring#watch-the-limits-and-retries) lists the metrics that show how close a node is to each limit and how often it refused.
 
 `max-snapshot-size` is the other limit; it appears under Storage.
 

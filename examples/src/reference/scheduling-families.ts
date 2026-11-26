@@ -21,13 +21,15 @@ const kronosDbStore = kronosDbSchedulingEventStore(kronosDbEventStore(kdb, "tool
 const pending = await kronosDbStore.listSchedules()
 const token = await kronosDbStore.scheduleIdempotent(
   {
-    kind: "event",
-    identifier: "overdue-t-1-ada",
-    name: { namespace: "toolstore", name: "RentalOverdue" },
-    version: "1.0",
-    payload: { toolId: "t-1", customerId: "ada" },
-    metadata: {},
-    timestamp: Date.now(),
+    event: {
+      kind: "event",
+      identifier: "overdue-t-1-ada",
+      name: { namespace: "toolstore", name: "RentalOverdue" },
+      version: "1.0",
+      payload: { toolId: "t-1", customerId: "ada" },
+      metadata: {},
+      timestamp: Date.now(),
+    },
     tags: [
       { key: "toolId", value: "t-1" },
       { key: "customerId", value: "ada" },

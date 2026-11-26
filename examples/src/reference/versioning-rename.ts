@@ -6,19 +6,22 @@ import {
   kronos,
   localCommandBus,
   localQueryBus,
-  qn,
   unitOfWork,
+  upcast,
   upcastingEventStore,
   withNamespace,
   type EventMessage,
-  type Upcast,
 } from "@kronos-ts/core"
 import { z } from "zod"
 
 const ns = withNamespace("toolstore")
 
 // What the log holds from before the event was renamed.
-const storedName = qn("toolstore", "RentalOverdue")
+export const RentalOverdue = ns.event("RentalOverdue", {
+  version: "1.0",
+  payload: z.object({ toolId: z.string(), customerId: z.string() }),
+  tags: { toolId: (payload) => payload.toolId, customerId: (payload) => payload.customerId },
+})
 
 // What the code calls it today.
 export const RentalLapsed = ns.event("RentalLapsed", {
@@ -27,35 +30,33 @@ export const RentalLapsed = ns.event("RentalLapsed", {
   tags: { toolId: (payload) => payload.toolId, customerId: (payload) => payload.customerId },
 })
 
-export const lapsedRentals: Upcast = (event) =>
-  event.name.namespace === storedName.namespace && event.name.name === storedName.name
-    ? { ...event, name: RentalLapsed.name, version: RentalLapsed.version }
-    : event
-
-export const storedTypes = (type: string) =>
-  type === "toolstore.RentalLapsed" ? [type, "toolstore.RentalOverdue"] : [type]
+export const lapsedRentals = upcast(RentalOverdue, RentalLapsed, (payload) => payload)
 
 export const noteLapsed = eventHandler(RentalLapsed, ({ payload }) => {
   console.log(`lapsed: ${payload.toolId} with ${payload.customerId}`)
 })
 
 const log = inMemoryEventStore()
-const eventStore = upcastingEventStore(log, lapsedRentals, { storedTypes })
+const eventStore = upcastingEventStore(log, [lapsedRentals])
 
 const old: EventMessage = {
   kind: "event",
   identifier: "e-1",
-  name: storedName,
+  name: RentalOverdue.name,
   version: "1.0",
   payload: { toolId: "t-1", customerId: "ada" },
   metadata: {},
   timestamp: 1_700_000_000_000,
-  tags: [
-    { key: "toolId", value: "t-1" },
-    { key: "customerId", value: "ada" },
-  ],
 }
-await log.append([old])
+await log.append([
+  {
+    event: old,
+    tags: [
+      { key: "toolId", value: "t-1" },
+      { key: "customerId", value: "ada" },
+    ],
+  },
+])
 
 const commandBus = localCommandBus(unitOfWork)
 const queryBus = localQueryBus(unitOfWork)

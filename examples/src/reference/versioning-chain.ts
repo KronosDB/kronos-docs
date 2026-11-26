@@ -2,12 +2,11 @@ import {
   afterEvents,
   inMemoryEventStore,
   inMemorySnapshottingEventStore,
-  is,
   snapshot,
   state,
+  upcast,
   upcastingEventStore,
   withNamespace,
-  type Upcast,
 } from "@kronos-ts/core"
 import { z } from "zod"
 
@@ -37,16 +36,9 @@ export const ToolAdded = ns.event("ToolAdded", {
   tags: { toolId: (payload) => payload.toolId },
 })
 
-const toolAddedV2: Upcast = (event) =>
-  is(event, ToolAddedV1)
-    ? { ...event, version: ToolAddedV2.version, payload: { ...event.payload, category: "uncategorized" } }
-    : event
-
-const toolAddedV3: Upcast = (event) =>
-  is(event, ToolAddedV2) ? { ...event, version: ToolAdded.version } : event
-
-// Oldest step first. An event enters at the step that matches its stored version.
-const upcast: Upcast = (event) => toolAddedV3(toolAddedV2(event))
+// One upcast per step. An event goes through every step that applies to it.
+const toV2 = upcast(ToolAddedV1, ToolAddedV2, (payload) => ({ ...payload, category: "uncategorized" }))
+const toV3 = upcast(ToolAddedV2, ToolAdded, (payload) => payload)
 
 export const Tool = snapshot(
   state({
@@ -61,5 +53,5 @@ export const Tool = snapshot(
 // Upcasting outermost: every event that reaches a fold has been converted.
 export const eventStore = upcastingEventStore(
   inMemorySnapshottingEventStore(inMemoryEventStore()),
-  upcast,
+  [toV2, toV3],
 )

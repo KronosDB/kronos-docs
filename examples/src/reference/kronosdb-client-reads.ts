@@ -5,7 +5,6 @@ import {
   kronosDbPositionAt,
   kronosDbSchedulingEventStore,
   kronosDbSubscription,
-  kronosDbTagsAt,
   kronosDbTail,
 } from "@kronos-ts/kronosdb"
 
@@ -15,8 +14,7 @@ export async function firstEventOfTheDay(day: Date) {
   const tail = await kronosDbTail(kdb, "toolstore")
   const position = await kronosDbPositionAt(kdb, "toolstore", day)
   if (position === undefined) return undefined
-  const tags = await kronosDbTagsAt(kdb, "toolstore", position)
-  return { tail, position, tags }
+  return { tail, position }
 }
 
 export function watchQuietly() {

@@ -45,7 +45,8 @@ The metrics worth watching are these.
 | `kronosdb_head_position` | gauge | Next position after what a majority has committed. Events below it are acknowledged and readable. |
 | `kronosdb_replication_lag_events` | gauge | Events this node holds that a majority does not yet hold. |
 | `kronosdb_events_appended_total` | counter | Events appended. |
-| `kronosdb_dcb_violations_total` | counter | Appends rejected by a consistency condition. |
+| `kronosdb_retried_appends_total` | counter | Appends the node recognised as a retry of events already in the log. They got the positions the events have, and nothing was written. |
+| `kronosdb_dcb_violations_total` | counter | Appends rejected by a consistency condition. A retry the node recognises is not counted. |
 | `kronosdb_ack_degradations_total` | counter | Appends acknowledged after the write instead of after the fsync because the disk was behind. |
 | `kronosdb_engine_poisoned` | gauge | 1 after a group commit fails, for example on an fsync error. The context rejects every write until the node restarts. |
 | `kronosdb_data_dir_bytes` | gauge | Bytes on disk under the context's directory. |
@@ -53,12 +54,23 @@ The metrics worth watching are these.
 | `kronosdb_raft_is_leader` | gauge | 1 when this node is the leader. |
 | `kronosdb_native_epoch` | gauge | Rises by at least one for each new leader. |
 | `kronosdb_native_write_gate_open` | gauge | 1 when this node may execute appends locally, which is true on the leader only. |
+| `kronosdb_pending_append_bytes` | gauge | Bytes of appends this node holds while they wait to be committed. Compare it with `max-pending-append-bytes`. |
+| `kronosdb_append_deadline_exceeded_total` | counter | Appends not confirmed within the `[timeouts] append` deadline and failed with `unavailable`. |
+| `kronosdb_native_handshakes` | gauge | Client connections still in their TLS and Hello handshake. Compare it with `max-handshakes`. |
+| `kronosdb_native_client_connections` | gauge | Client connections past their handshake. Cluster peers are not counted. Compare it with `max-connections`. |
+| `kronosdb_native_limit_refusals_total{limit}` | counter | Connections and requests refused at a `[limits]` setting. `limit` is `max-handshakes`, `max-connections`, `max-streams-per-connection` or `max-pending-append-bytes`. |
 | `kronosdb_hardware_finding{check,severity}` | gauge | 1 for each startup check that found something, listed below. |
 | `kronosdb_archive_last_success_timestamp_seconds` | gauge | Unix time of the last successful archive pass, 0 for never. Reported by the leader, and only with an archive URL. |
 | `kronosdb_archive_lag_events` | gauge | Events in sealed segments that are not archived yet. Reported by the leader. |
 | `kronosdb_archive_evicted_position` | gauge | End of the part of the log that this node removed from its disk. Events below it are read from the archive. |
 | `kronosdb_auth_authenticated_total{method}` | counter | Handshakes that succeeded, by `token`, `jwt` or `mtls`. |
 | `kronosdb_auth_rejected_total{reason}` | counter | Requests rejected, by `unauthenticated` or `permission_denied`. |
+
+## Watch the limits and retries
+
+The limits in [Configuration](/docs/kronosdb/configuration#limits-and-timeouts) protect a node from clients that open more than it can hold. `kronosdb_native_limit_refusals_total` rises for the limit that refused something, and the two gauges show how close the node is to `max-handshakes` and `max-connections` before it refuses. A rate above zero for `max-connections` or `max-streams-per-connection` means a fleet of clients, or one client that leaks connections or streams, is larger than the setting allows. Raise the limit when the load is expected, and look at the client otherwise. A rate above zero for `max-pending-append-bytes` means appends arrive faster than the node commits them, for example while a majority is unreachable or the disk is behind.
+
+An append that the node cannot confirm within the append deadline fails with `unavailable` and is counted in `kronosdb_append_deadline_exceeded_total`. In a cluster this happens when a majority is not reachable, so it rises with `kronosdb_native_write_gate_open` at 0 or with a growing `kronosdb_replication_lag_events`. A client sends such an append again, so a rise here shows up as appends that take longer, and `kronosdb_retried_appends_total` counts the ones that had already been written. A few retried appends after a failover are normal. A steady rate means connections are dropping between the commit and the response, or the deadline is shorter than the node needs to commit under its load.
 
 ## Read the logs
 

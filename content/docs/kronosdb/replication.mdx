@@ -21,13 +21,13 @@ The leader acknowledges an append when a majority of the voters have its events.
 
 ## Failover
 
-When the leader fails or loses its connection to a majority, the remaining voters elect a new leader. It has to finish a few steps before it accepts appends, so an append sent in the meantime fails with `unavailable` and nothing is written. The client retries it, and the failover usually completes within a few seconds.
+When the leader fails or loses its connection to a majority, the remaining voters elect a new leader. It has to finish a few steps before it accepts appends, so an append sent in the meantime fails with `unavailable` and nothing is written. The client sends it again, and the failover usually completes within a few seconds. With the default Raft timing, a follower takes over from a leader that froze after at most about 12 seconds.
 
 A failover has these effects on a client:
 
 - A connection to the failed node closes. The client reconnects to any node, and registrations and subscriptions are made again.
 - An append sent while the election runs fails with `unavailable` and nothing is written.
-- An append that was in flight when leadership was lost fails with `unavailable` and an unknown outcome. The events may have been committed, or may have been discarded. Retrying with the same condition resolves it, as described under [errors](/docs/kronosdb/events-and-tags#errors).
+- An append that was in flight when leadership was lost fails with `unavailable` and an unknown outcome. The events may have been committed, or may have been discarded. The client sends the same append again, and the new leader returns the positions of the events it holds or writes them, as [Retrying an append](/docs/kronosdb/events-and-tags#retrying-an-append) describes. A node recognises a retry only among the newest events of a context, and after a restart only among the events in its open segment.
 - A subscription on a surviving node continues, and a subscription on the failed node ends and is resumed from the position the client stored.
 - Commands in flight to handlers on the failed node fail, and the sender retries them. The failed node's handlers are removed, so the retry reaches another handler.
 
@@ -55,7 +55,7 @@ An operator adds and removes nodes through the admin API or the admin console. A
 
 | Failure | When |
 | --- | --- |
-| `unavailable` | An election is running, a new leader is taking over, a membership change is in progress, a majority is unreachable, or leadership was lost during an append. |
+| `unavailable` | An election is running, a new leader is taking over, a membership change is in progress, a majority is unreachable, leadership was lost during an append, or an append was not confirmed within the append deadline. |
 | `corrupted` | A replicated record failed an integrity check. |
 | `internal` | A group-commit failure poisoned the event store, or a node found that its log holds a leader term beyond the cluster's current one. |
 

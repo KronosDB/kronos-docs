@@ -14,7 +14,7 @@ Both stores ran on the same server, one at a time, and were driven from the same
 | Server | AWS i4i.2xlarge: Intel Xeon Platinum 8375C, 8 vCPU, 64 GB, 1.7 TB local NVMe (XFS, `noatime`), Amazon Linux 2023 |
 | Client | AWS c7i.2xlarge, 8 vCPU, in the same availability zone and cluster placement group (round trip 0.29 ms) |
 | KronosDB | Development build `262f024` (after 0.10.1, with the native protocol), default settings. A single node acknowledges an append after `fdatasync`. |
-| Postgres | 16.15 with `fsync`, `synchronous_commit` and `full_page_writes` on, `shared_buffers` 16 GB, `wal_buffers` 64 MB, `max_wal_size` 32 GB. Events in one table with a GIN index on tags and a B-tree index on type. An append takes a shared advisory lock, checks the condition, inserts all its events in one statement and sends a `NOTIFY` after commit, as `@kronos-ts/postgres` does. |
+| Postgres | 16.15 with `fsync`, `synchronous_commit` and `full_page_writes` on, `shared_buffers` 16 GB, `wal_buffers` 64 MB, `max_wal_size` 32 GB. Events in one table with a GIN index on tags and a B-tree index on type. An append takes a shared advisory lock, checks the condition, inserts all its events in one statement and sends a `NOTIFY` after commit. |
 | Clients | KronosDB's native protocol client; `tokio-postgres` for Postgres |
 | Method | 10 000 events loaded first, 3 s warm-up, 10 s measured. The median of 5 runs for single events and of 3 runs for batches and reads. |
 

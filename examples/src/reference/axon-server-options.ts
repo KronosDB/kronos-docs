@@ -32,6 +32,7 @@ export async function connectToCluster(token: string) {
     resilience: {
       maxAttempts: 10,
       initialDelayMs: 200,
+      healthCheckThresholdMs: 2_000,
     },
   })
 }

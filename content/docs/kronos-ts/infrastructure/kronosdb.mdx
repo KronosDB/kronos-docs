@@ -5,7 +5,7 @@ description: The @kronos-ts/kronosdb package connects a Kronos application to a 
 
 `@kronos-ts/kronosdb` is the client for [KronosDB](/docs/kronosdb). It provides an event store, snapshot and scheduling tiers on top of that store, a command bus and a query bus that route through the server, and a control plane through which the server administers your event processors. Each piece is a plain function over one shared connection, so an application that only needs the event store builds only the event store.
 
-The client needs a server that implements native protocol version 2 (KronosDB 0.12 or later). It connects over TCP, or over TLS on the same port.
+The client needs a server that implements native protocol version 2 (KronosDB 0.12 or later), and KronosDB 0.17 or later to [send an append again](#sending-an-append-again). It connects over TCP, or over TLS on the same port.
 
 ## Connecting
 
@@ -55,7 +55,7 @@ await kdb.start()
 | `kronosDbCommandBus`, `kronosDbQueryBus` | Buses that route through the server. Wrap a local bus. |
 | `kronosDbControlPlane` | Lets the server administer your event processors. Optional. |
 
-Events read back carry their `tags`. A dispatch always goes to the server, even for a command this process handles. To handle such a command locally, wrap the bus in `localFirstCommandBus(bus, local)` or `localFirstQueryBus(bus, local)`. Wrap the outermost bus in `interceptingCommandBus(bus, correlation)` so the intercept runs before the message is serialized.
+A dispatch always goes to the server, even for a command this process handles. To handle such a command locally, wrap the bus in `localFirstCommandBus(bus, local)` or `localFirstQueryBus(bus, local)`. Wrap the outermost bus in `interceptingCommandBus(bus, correlation)` so the intercept runs before the message is serialized.
 
 ## Contexts and bus names
 
@@ -65,11 +65,19 @@ The command and query buses take a bus name instead of a context, as their third
 
 Handlers announce themselves under the connection's `clientId`. A restarted process that keeps its `clientId` replaces its previous registration. Two buses built for the same bus name on one connection are both kept.
 
+## Sending an append again
+
+An append that the server rejects with `unavailable`, or whose connection is lost before the response, may or may not have been written. `kronosDbEventStore` sends it again with the same events, which keep the identifiers they were built with, and so does a transaction's commit. The first new try comes after 50 ms and the wait grows to 1 second between tries, until the server responds or `appendRetryMs` has passed. The server recognises events it already holds and returns their positions, so nothing is written twice, and an append rides through a leader failover or a server restart without an error.
+
+A conflict, any other refusal from the server, and an append with an event that has no identifier are not sent again. Neither is an append when the connection is closed, when `appendRetryMs` is 0, or when the server did not grant retry-safe appends in the handshake, which a server older than 0.17 does not, because it would write the events a second time. In each case the append fails with the error of its last try. When `appendRetryMs` passes first, that is an `unavailable` error (`isUnavailable`) and the append may have been written. A caller that then sends the command again relies on the append condition of its decision, as for any command that may have run.
+
+What the server recognises is limited: only the newest events of a context, and after a restart only those in the node's open segment. [Retrying an append](/docs/kronosdb/events-and-tags#retrying-an-append) lists the limits and the settings an operator has.
+
 ## Scheduling and snapshots
 
 The server stores schedules and appends the event when it is due. A schedule is durable once `schedule()` resolves, it fires once across a leader failover, and a schedule that came due while the server was down fires on recovery. Scheduling does not join the caller's unit of work: a handler that schedules an event and then throws has still armed the schedule.
 
-`cancelSchedule` returns `cancelled`, `already-appended` or `not-found`. `scheduleIdempotent(event, at, token)` takes a token you choose, so a retried call throws `ScheduleAlreadyExistsError` instead of arming a second schedule. `listSchedules` returns the pending schedules, soonest first. Scheduling and cancelling must reach the cluster leader, so a follower returns an `unavailable` error and the caller retries.
+`cancelSchedule` returns `cancelled`, `already-appended` or `not-found`. `scheduleIdempotent({ event, tags }, at, token)` takes a token you choose, so a retried call throws `ScheduleAlreadyExistsError` instead of arming a second schedule. `listSchedules` returns the pending schedules, soonest first. Scheduling and cancelling must reach the cluster leader, so a follower returns an `unavailable` error and the caller retries.
 
 ```ts
 const eventStore = kronosDbSchedulingEventStore(kronosDbEventStore(kdb, "toolstore"), kdb, "toolstore")
@@ -106,7 +114,7 @@ const control = kronosDbControlPlane(kdb, app.processors)
 await kdb.start()
 ```
 
-A processor that throws on an instruction, for example splitting a segment that does not exist, is reported to the server as failed with the error's message. An instruction for an unknown processor changes nothing. Segments are described on the [event processors page](/docs/kronos-ts/event-processors), and an instruction for one applies to that processor only.
+A processor that throws on an instruction, for example splitting a segment that does not exist, is reported to the server as failed with the error's message. An instruction for a processor the application does not have is reported to the server as failed, with the message `No event processor named "<name>" in this application`. Segments are described on the [event processors page](/docs/kronos-ts/event-processors), and an instruction for one applies to that processor only.
 
 ## Options
 
@@ -124,6 +132,7 @@ A processor that throws on an instruction, for example splitting a segment that 
     connectTimeoutMs: { type: "number", default: "10000", description: "Time allowed to connect and finish the handshake, per server." },
     reconnectIntervalMs: { type: "number", default: "2000", description: "Base delay between reconnection attempts. It doubles per attempt up to 30000." },
     maxReconnectAttempts: { type: "number", default: "0", description: "Attempts before reconnecting gives up. 0 retries without limit." },
+    appendRetryMs: { type: "number", default: "30000", description: "How long an append is sent again when the server responds with unavailable or the connection is lost before it responds. 0 sends every append once. Needs KronosDB 0.17 or later." },
     startTimeoutMs: { type: "number", default: "30000", description: "How long start() waits for the server to acknowledge this client's handlers." },
     shutdownTimeoutMs: { type: "number", default: "30000", description: "How long close() waits for in-flight messaging to drain before it closes the socket anyway." },
   }}
@@ -139,11 +148,11 @@ The command and query buses take an options object as their fourth argument:
   }}
 />
 
-A command's metadata can carry `processingInstructions` with a `routingKey`, a `priority` and a `timeoutMs`. Commands with the same routing key go to the same handler. Two concurrent dispatches on one bus with the same message identifier fail, so use a fresh identifier for each.
+A command's metadata can carry `processingInstructions` with a `routingKey`, a `priority` and a `timeoutMs`. Commands with the same routing key go to the same handler. A command declaration has no routing key of its own, so pass the key in the metadata of `send` or `ctx.send`. Two concurrent dispatches on one bus with the same message identifier fail, so use a fresh identifier for each.
 
 ## When the connection drops
 
-The client opens a new socket on the next request after one dies, trying the configured servers in order. A request in flight on the lost socket fails with `ConnectionFailedError`, and the client does not send it again. A command or query that failed this way may or may not have run, so the caller decides whether to send it again, and handlers should be idempotent.
+The client opens a new socket on the next request after one dies, trying the configured servers in order. A command or query in flight on the lost socket fails with `ConnectionFailedError`, and the client does not send it again. It may or may not have run, so the caller decides whether to send it again, and handlers should be idempotent. An append is different: the client [sends it again](#sending-an-append-again) on a new socket.
 
 Handler registrations are restored without action from you. Each handler stream reopens, registers its names again and resumes, retrying with growing delays and logging each retry with `console.warn`. A subscription an event processor reads ends with an error, and the processor reopens it from its stored token. A subscription query ends, and the subscriber has to subscribe again.
 
@@ -177,8 +186,8 @@ if (error instanceof KronosDbError) return `kronosdb:${error.errorCode}`
 | --- | --- | --- |
 | An append's condition was violated; nothing was written | `ConcurrencyError` (`isConflict`) | Load the state again and decide again. |
 | Nothing handles the command or query | `NoHandlerForCommandError` or `NoHandlerForQueryError` (`isNoHandler`) | Check that the handling process called `kdb.start()` on the same bus name. |
-| The socket was lost, would not connect, or the handshake timed out | `ConnectionFailedError` (`isUnavailable`) | Retry. The request may have run. |
-| The server is not ready, is failing over, or a follower rejected a schedule write | `KronosDbRequestError` with status `unavailable` (`isUnavailable`) | Retry. |
+| The socket was lost, would not connect, or the handshake timed out | `ConnectionFailedError` (`isUnavailable`) | Retry. The request may have run. For an append this means the client already tried for `appendRetryMs`. |
+| The server is not ready, is failing over, is at one of its limits, or a follower rejected a schedule write | `KronosDbRequestError` with status `unavailable` (`isUnavailable`) | Retry. An append has been sent again for `appendRetryMs` before it fails this way, and it may have been written. |
 | The deadline passed | `UnavailableError`, "Messaging deadline exceeded after Nms" (`isUnavailable`) | Retry. The command may still have run. |
 | A bus is at `maxConcurrentHandlers` or `maxPendingRequests` | `MessagingOverloadedError` (`isUnavailable`) | Retry later, or raise the limits. |
 | The connection is closing | `ShutdownInProgressError` (`isUnavailable`) | Stop dispatching. |

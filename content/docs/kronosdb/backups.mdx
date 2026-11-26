@@ -50,7 +50,7 @@ docker run --rm -v kronosdb-restored:/data -v "$PWD/backup":/backup \
 docker run -d --name kronosdb-restored \
   -p 50051:50051 -p 9240:9240 \
   -v kronosdb-restored:/data \
-  ghcr.io/kronosdb/kronosdb:0.16.0
+  ghcr.io/kronosdb/kronosdb:0.17.0
 ```
 
 On Kubernetes, create a volume from the snapshot and mount it as the pod's data volume. The restored node continues from the last position it had in the copy, so events appended after the copy was taken are not in it.
@@ -78,7 +78,7 @@ docker run -d --name kronosdb-learner \
   -e KRONOSDB_CLUSTER_NODE_ID=101 \
   -e KRONOSDB_CLUSTER_PEERS=1=node1:50051,2=node2:50051,3=node3:50051 \
   -e KRONOSDB_ACCESS_TOKEN="$KRONOSDB_ACCESS_TOKEN" \
-  ghcr.io/kronosdb/kronosdb:0.16.0
+  ghcr.io/kronosdb/kronosdb:0.17.0
 ```
 
 A learner copies whatever the cluster contains, including a mistake, so it protects against losing nodes and not against bad writes.

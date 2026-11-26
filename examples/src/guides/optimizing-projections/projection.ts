@@ -7,7 +7,7 @@ import { type Repositories, repositoryHandler } from "./repository"
 type Context = EventHandlerContext & Repositories<{ inventory: typeof inventory }>
 
 /** The events of one tool stay in order; different tools run side by side. */
-export const byTool = (event: EventMessage) => event.tags.find((tag) => tag.key === "toolId")?.value ?? event.identifier
+export const byTool = (event: EventMessage) => (event.payload as { toolId?: string }).toolId ?? event.identifier
 
 export const projection = [
   eventHandler(

@@ -27,7 +27,7 @@ An application reaches KronosDB through a client library. The `kronos` command l
 | --- | --- | --- |
 | `@kronos-ts/kronosdb` | TypeScript | The event store and buses of [Kronos](/docs/kronos-ts/infrastructure/kronosdb). |
 | `kronosdb-client` | Rust | A client library in the server repository, used by the `kronos` CLI. |
-| `axon-kronosdb-connector` | Java | Connects Axon Framework 5.3 and later applications, version 0.6 or later for KronosDB 0.11 or later. |
+| `axon-kronosdb-connector` | Java | Connects Axon Framework 5.3 and later applications, version 0.6 or later for KronosDB 0.11 or later. Version 0.8 or later sends an append again after `unavailable`, which needs KronosDB 0.17 or later. |
 
 Client authors find the protocol schema at [github.com/KronosDB/kronosdb/tree/main/protocol](https://github.com/KronosDB/kronosdb/tree/main/protocol).
 

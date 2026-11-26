@@ -57,13 +57,15 @@ async function addTool(toolId: string, model: string, name: string) {
   const payload = { toolId, model, name }
   await eventStore.append([
     {
-      kind: "event",
-      identifier: crypto.randomUUID(),
-      name: ToolAdded.name,
-      version: ToolAdded.version,
-      payload,
-      metadata: emptyMetadata(),
-      timestamp: Date.now(),
+      event: {
+        kind: "event",
+        identifier: crypto.randomUUID(),
+        name: ToolAdded.name,
+        version: ToolAdded.version,
+        payload,
+        metadata: emptyMetadata(),
+        timestamp: Date.now(),
+      },
       tags: tagsOf(ToolAdded, payload, emptyMetadata()),
     },
   ])

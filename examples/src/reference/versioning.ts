@@ -3,15 +3,14 @@ import {
   eventProcessor,
   inMemoryEventStore,
   inMemoryTokenStore,
-  is,
   kronos,
   localCommandBus,
   localQueryBus,
   unitOfWork,
+  upcast,
   upcastingEventStore,
   withNamespace,
   type EventMessage,
-  type Upcast,
 } from "@kronos-ts/core"
 import { z } from "zod"
 
@@ -31,23 +30,14 @@ export const ToolAdded = ns.event("ToolAdded", {
   tags: { toolId: (payload) => payload.toolId },
 })
 
-export const addCategory: Upcast = (event) => {
-  if (is(event, ToolAddedV1)) {
-    return {
-      ...event,
-      version: ToolAdded.version,
-      payload: { ...event.payload, category: "uncategorized" },
-    }
-  }
-  return event
-}
+export const addCategory = upcast(ToolAddedV1, ToolAdded, (payload) => ({ ...payload, category: "uncategorized" }))
 
 export const recordAddedTool = eventHandler(ToolAdded, ({ payload }) => {
   console.log(`${payload.toolId} ${payload.name} (${payload.category})`)
 })
 
 const log = inMemoryEventStore()
-const eventStore = upcastingEventStore(log, addCategory)
+const eventStore = upcastingEventStore(log, [addCategory])
 
 // A ToolAdded as it was stored when the version was 1.0.
 const stored: EventMessage = {
@@ -58,9 +48,8 @@ const stored: EventMessage = {
   payload: { toolId: "t-1", model: "DCD791", name: "Cordless drill" },
   metadata: {},
   timestamp: 1_700_000_000_000,
-  tags: [{ key: "toolId", value: "t-1" }],
 }
-await log.append([stored])
+await log.append([{ event: stored, tags: [{ key: "toolId", value: "t-1" }] }])
 
 const commandBus = localCommandBus(unitOfWork)
 const queryBus = localQueryBus(unitOfWork)

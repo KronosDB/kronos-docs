@@ -123,10 +123,10 @@ The rows and the position commit together, as with per-event handlers. A replay 
 
 ## Run sequences side by side
 
-With `get`s in one handler after another, each `get` that misses the batch is a read of its own. `concurrent(processor, sequenceOf)` runs the handlers of different sequences side by side, so the `get`s of a batch arrive in the same turn and are read with one `select`. A **sequence** is the set of events that must be handled in log order. Here it is a tool, read from the event's `toolId` tag:
+With `get`s in one handler after another, each `get` that misses the batch is a read of its own. `concurrent(processor, sequenceOf)` runs the handlers of different sequences side by side, so the `get`s of a batch arrive in the same turn and are read with one `select`. A **sequence** is the set of events that must be handled in log order. Here it is a tool, read from the `toolId` of the event's payload:
 
 ```ts
-const byTool = (event: EventMessage) => event.tags.find((tag) => tag.key === "toolId")?.value ?? event.identifier
+const byTool = (event: EventMessage) => (event.payload as { toolId?: string }).toolId ?? event.identifier
 ```
 
 The slice's function builds its processor with `pipe`, its wrappers listed innermost first. `eventProcessor` is the function the slice receives, with the stores already applied:

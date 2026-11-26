@@ -5,10 +5,10 @@
     "": {
       "name": "kronos-docs-examples",
       "dependencies": {
-        "@kronos-ts/core": "0.12.0",
-        "@kronos-ts/otlp": "0.7.7",
-        "@kronos-ts/postgres": "0.21.5",
-        "@kronos-ts/test": "0.9.3",
+        "@kronos-ts/core": "0.13.0",
+        "@kronos-ts/otlp": "0.7.8",
+        "@kronos-ts/postgres": "0.22.0",
+        "@kronos-ts/test": "0.10.0",
         "drizzle-orm": "0.45.4",
         "pg": "^8.16.0",
         "zod": "^4.0.0",
@@ -79,13 +79,13 @@
 
     "@esbuild/win32-x64": ["@esbuild/win32-x64@0.25.12", "", { "os": "win32", "cpu": "x64" }, "sha512-alJC0uCZpTFrSL0CCDjcgleBXPnCrEAhTBILpeAp7M/OFgoqtAetfBzX0xM00MUsVVPpVjlPuMbREqnZCXaTnA=="],
 
-    "@kronos-ts/core": ["@kronos-ts/core@0.12.0", "", { "dependencies": { "uuid": "^11" } }, "sha512-c8+JLqcH1XMaGJirvXGgk2GjW1m+T72kK925dQ1as7XwCxmTSXS19fYM+b2yfxN39n05M0RUnlg0/tTZmdtgyw=="],
+    "@kronos-ts/core": ["@kronos-ts/core@0.13.0", "", { "dependencies": { "uuid": "^11" } }, "sha512-BeGQmqPU/52LJz4VmcPsJy1PxrigWlQ45mdZWRlXg0UNilwvM5z5bUMYLOX/1xfOg6eO1AptZrGv3mGGjBAu4g=="],
 
-    "@kronos-ts/otlp": ["@kronos-ts/otlp@0.7.7", "", { "dependencies": { "@kronos-ts/core": "0.12.0" } }, "sha512-s/DIkVYAZTFCgpNuvTUXMYvePFS6Dov/H6PUe+b+0DdILX52A6Q8M1VkKwsVjmIh4uTsb0uSk42h+Kyl0LFWlw=="],
+    "@kronos-ts/otlp": ["@kronos-ts/otlp@0.7.8", "", { "dependencies": { "@kronos-ts/core": "0.13.0" } }, "sha512-hkbe5f8A5SW1NXw9ehmBsCq4GS0NErjF+0qO9aBvN/LBX+g3maNS9koO9L8pSCn+014TD6cRwlvP7PP/zpbuGw=="],
 
-    "@kronos-ts/postgres": ["@kronos-ts/postgres@0.21.5", "", { "dependencies": { "@kronos-ts/core": "0.12.0" }, "peerDependencies": { "pg": ">=8.0.0", "postgres": ">=3.0.0" }, "optionalPeers": ["pg", "postgres"] }, "sha512-PN3w/58q6jsKwtknwLTi+BAtj84WWrp14vCVoO5TtuNZQTCt8PLEOuR6cIkcAx1ZwMvltDBZudYvzZNx48jOdQ=="],
+    "@kronos-ts/postgres": ["@kronos-ts/postgres@0.22.0", "", { "dependencies": { "@kronos-ts/core": "0.13.0" }, "peerDependencies": { "pg": "^8.20.0", "postgres": "^3.4.9 || ^4.1.1" }, "optionalPeers": ["pg", "postgres"] }, "sha512-u9Z/TsCBSk2wKzgzpPIfLvVXP2bTvvzncCTrSL3pOF59ohftY2KcREjNQvN61d6MK9dTTqciZTT3hqssmB3bcQ=="],
 
-    "@kronos-ts/test": ["@kronos-ts/test@0.9.3", "", { "dependencies": { "@kronos-ts/core": "0.12.0" } }, "sha512-VtPhWAVLsRXwBqHV/GrgpqMn5fe8i5zNbtfbXfP76q61Tn2l/S6zkYt+U+ocRzxSBRHAs3rWETKFWm9uvqBCww=="],
+    "@kronos-ts/test": ["@kronos-ts/test@0.10.0", "", { "dependencies": { "@kronos-ts/core": "0.13.0" } }, "sha512-r5OZV9ahFxoPHkxsI7bc0lPoRnl0y+oiBW6EED/LXNDvbsajYC7ztEPpCrMRvPgKxT/1GkgTFglocYhSRAADBw=="],
 
     "@types/node": ["@types/node@26.6.6", "", { "dependencies": { "undici-types": "~8.9.0" } }, "sha512-MzQj+8Kx3XI40OmUAE6Qoh58ZMNstNNMwn2nfd3qWsfe7nDNSqJNzes4njhz6AHwrSHOffSLwXU6yb474Q4aog=="],
 

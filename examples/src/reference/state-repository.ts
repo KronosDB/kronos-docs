@@ -9,13 +9,15 @@ const eventStore = inMemoryEventStore()
 
 await eventStore.append([
   {
-    kind: "event",
-    identifier: "e-1",
-    name: ToolAdded.name,
-    version: ToolAdded.version,
-    payload: { toolId: "t-1", model: "DCD791", name: "Cordless drill" },
-    metadata: {},
-    timestamp: Date.now(),
+    event: {
+      kind: "event",
+      identifier: "e-1",
+      name: ToolAdded.name,
+      version: ToolAdded.version,
+      payload: { toolId: "t-1", model: "DCD791", name: "Cordless drill" },
+      metadata: {},
+      timestamp: Date.now(),
+    },
     tags: [{ key: "toolId", value: "t-1" }],
   },
 ])
