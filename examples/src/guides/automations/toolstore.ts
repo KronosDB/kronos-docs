@@ -14,16 +14,32 @@ import type { Receipts } from "./send-receipt/receipts"
 const notifications: Notifications = { send: async () => {} }
 const receipts: Receipts = { send: async () => {} }
 
-/** The context's slices. A slice that is not listed here does not run. */
+/**
+ * The context's handlers: each list is the sum of its slices' lists of that kind. A slice that is not spread here does
+ * not run. A slice that builds a processor is called once, so its lists share that processor.
+ */
 export const toolstore = (
   eventProcessor: (name: string) => EventProcessor,
   deadLettering: (processor: EventProcessor, sequence: Sequence) => EventProcessor,
-) => [
-  addTool(),
-  registerCustomer(),
-  rentTool(),
-  inventory(eventProcessor),
-  confirmRental(notifications, eventProcessor, deadLettering),
-  sendReceipt(receipts, eventProcessor, deadLettering),
-  requestService(eventProcessor),
-]
+) => {
+  const inventoryView = inventory(eventProcessor)
+  const confirmation = confirmRental(notifications, eventProcessor, deadLettering)
+  const receipt = sendReceipt(receipts, eventProcessor, deadLettering)
+  const service = requestService(eventProcessor)
+  return {
+    commandHandlers: [
+      ...addTool().commandHandlers,
+      ...registerCustomer().commandHandlers,
+      ...rentTool().commandHandlers,
+      ...receipt.commandHandlers,
+      ...service.commandHandlers,
+    ],
+    queryHandlers: [...inventoryView.queryHandlers],
+    eventHandlers: [
+      ...inventoryView.eventHandlers,
+      ...confirmation.eventHandlers,
+      ...receipt.eventHandlers,
+      ...service.eventHandlers,
+    ],
+  }
+}

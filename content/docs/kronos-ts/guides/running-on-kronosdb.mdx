@@ -101,12 +101,12 @@ const queryBus = localFirstQueryBus(kronosDbQueryBus(localQueries, kdb, "toolsto
 The event store and the buses come from KronosDB. The processors' token store and unit of work come from Postgres as before, so a batch's table writes and its new position still commit in one Postgres transaction. Only what `main.ts` opens changes; the slices and the context do not:
 
 ```ts
-const handlers = [
-  ...toolstore((name) => eventProcessor(name, eventStore, postgresTokenStore(pg), postgresUnitOfWork(unitOfWork, pg))),
-]
+const toolstoreHandlers = toolstore((name) =>
+  eventProcessor(name, eventStore, postgresTokenStore(pg), postgresUnitOfWork(unitOfWork, pg)),
+)
 ```
 
-The handlers are then passed to `kronos()` with the same wrappers as in [Organize an app into slices](/docs/kronos-ts/guides/slices#compose-in-maints), and the connection is started:
+The context's lists are then passed to `kronos()` with the same wrappers as in [Organize an app into slices](/docs/kronos-ts/guides/slices#compose-in-maints), and the connection is started:
 
 ```ts
 await kdb.start()

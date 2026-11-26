@@ -186,23 +186,21 @@ const notifications: Notifications = { send: async () => {} }
 const receipts: Receipts = { send: async () => {} }
 ```
 
-The context takes `deadLettering` beside `eventProcessor` and passes them on, and each automation is one more line in its list:
+The context takes `deadLettering` beside `eventProcessor` and passes them on. It calls each automation once, and spreads its lists into the context's lists of the same kind:
 
 ```ts
-confirmRental(notifications, eventProcessor, deadLettering),
-sendReceipt(receipts, eventProcessor, deadLettering),
-requestService(eventProcessor),
+const confirmation = confirmRental(notifications, eventProcessor, deadLettering)
+const receipt = sendReceipt(receipts, eventProcessor, deadLettering)
+const service = requestService(eventProcessor)
 ```
 
 `main.ts` writes the function anonymously, as it does `eventProcessor`, by applying Kronos's `deadLettering` to the application's dead-letter queue, here the one in Postgres:
 
 ```ts
-const handlers = [
-  ...toolstore(
-    (name) => eventProcessor(name, eventStore, postgresTokenStore(pg), postgresUnitOfWork(unitOfWork, pg)),
-    (processor, sequence) => deadLettering(processor, postgresDeadLetterQueue(pg), sequence),
-  ),
-]
+const toolstoreHandlers = toolstore(
+  (name) => eventProcessor(name, eventStore, postgresTokenStore(pg), postgresUnitOfWork(unitOfWork, pg)),
+  (processor, sequence) => deadLettering(processor, postgresDeadLetterQueue(pg), sequence),
+)
 ```
 
 An automation sends its commands as itself. When `main.ts` adds `correlatingHandler` to the wrappers every handler shares, a command carries the correlation of the rental that caused it, so a trace or a log line leads from the receipt back to the request that rented the tool. [Interception and validation](/docs/kronos-ts/interception-and-validation) and [Observability](/docs/kronos-ts/observability) describe correlation and logging. Log through `ctx.log` only what the events do not record, such as the outcome of a call.

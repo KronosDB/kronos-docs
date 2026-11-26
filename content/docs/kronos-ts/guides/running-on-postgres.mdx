@@ -85,12 +85,12 @@ const commandBus = localCommandBus(postgresUnitOfWork(unitOfWork, pg))
 const queryBus = localQueryBus(unitOfWork)
 ```
 
-`main.ts` then calls the slices. The processors are built by the function the slices receive as `eventProcessor`, which applies Kronos's `eventProcessor` to the event store, a Postgres token store and the Postgres unit of work:
+`main.ts` then calls the context once. The processors are built by the function the slices receive as `eventProcessor`, which applies Kronos's `eventProcessor` to the event store, a Postgres token store and the Postgres unit of work:
 
 ```ts
-const handlers = [
-  ...toolstore((name) => eventProcessor(name, eventStore, postgresTokenStore(pg), postgresUnitOfWork(unitOfWork, pg))),
-]
+const toolstoreHandlers = toolstore((name) =>
+  eventProcessor(name, eventStore, postgresTokenStore(pg), postgresUnitOfWork(unitOfWork, pg)),
+)
 ```
 
 `main.ts` wraps every query and event handler with `postgresHandler(next, pg)` over the same pool, as described in [Organize an app into slices](/docs/kronos-ts/guides/slices#compose-in-maints), so a batch's table writes and its new position commit in one transaction. A token store or an SQL client built from a different pool opens a second connection, and its writes are not atomic with the rest.

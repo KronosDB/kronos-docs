@@ -32,8 +32,8 @@ import { pipe } from "./pipe"
 import { migrate } from "./migrations"
 
 /**
- * What a test file builds its app from. `app(...slices)` composes the slices the test passes exactly as `main.ts`
- * composes every slice, over an in-memory log and a recorded command bus, so `fixture()` can observe them, and stops
+ * What a test file builds its app from. `app(handlers)` takes one set of the three lists, a slice's or a context's,
+ * and composes them exactly as `main.ts` composes the contexts' lists, over an in-memory log and a recorded command bus, so `fixture()` can observe them, and stops
  * the app after the file's last test. `{ db: true }` gives the app a fresh Postgres database, dropped afterwards, for
  * slices that write tables; without it the app is given a pool that is never opened.
  */
@@ -51,48 +51,40 @@ export async function testInfrastructure(options?: { db: true }) {
     await database?.drop()
   })
 
-  const app = (
-    ...slices: Array<{
-      commandHandlers: CommandHandler<any, any, any>[]
-      queryHandlers: QueryHandler<any, any, any>[]
-      eventHandlers: (EventHandler<any, any> & { processor: EventProcessor })[]
-    }>
-  ) => {
+  const app = (handlers: {
+    commandHandlers: CommandHandler<any, any, any>[]
+    queryHandlers: QueryHandler<any, any, any>[]
+    eventHandlers: (EventHandler<any, any> & { processor: EventProcessor })[]
+  }) => {
     const running = kronos({
-      commandHandlers: slices
-        .flatMap((slice) => slice.commandHandlers)
-        .map((handler) => ({
-          ...handler,
-          handler: pipe(handler.handler, (next) => validatingHandler(next, handler.descriptor)),
-          eventStore,
-          commandBus,
-          queryBus,
-        })),
-      queryHandlers: slices
-        .flatMap((slice) => slice.queryHandlers)
-        .map((handler) => ({
-          ...handler,
-          handler: pipe(
-            handler.handler,
-            (next) => postgresHandler(next, pg),
-            (next) => validatingHandler(next, handler.descriptor),
-          ),
-          queryBus,
-        })),
-      eventHandlers: slices
-        .flatMap((slice) => slice.eventHandlers)
-        .map((handler) => ({
-          ...handler,
-          handler: pipe(
-            handler.handler,
-            (next) => postgresHandler(next, pg),
-            (next) => validatingHandler(next, handler.descriptor),
-          ),
-          commandBus,
-          queryBus,
-          // Built over this recorded log by the `eventProcessor` below, so fixture() sees it as recorded.
-          processor: handler.processor as EventProcessor<UnitOfWork, typeof eventStore>,
-        })),
+      commandHandlers: handlers.commandHandlers.map((handler) => ({
+        ...handler,
+        handler: pipe(handler.handler, (next) => validatingHandler(next, handler.descriptor)),
+        eventStore,
+        commandBus,
+        queryBus,
+      })),
+      queryHandlers: handlers.queryHandlers.map((handler) => ({
+        ...handler,
+        handler: pipe(
+          handler.handler,
+          (next) => postgresHandler(next, pg),
+          (next) => validatingHandler(next, handler.descriptor),
+        ),
+        queryBus,
+      })),
+      eventHandlers: handlers.eventHandlers.map((handler) => ({
+        ...handler,
+        handler: pipe(
+          handler.handler,
+          (next) => postgresHandler(next, pg),
+          (next) => validatingHandler(next, handler.descriptor),
+        ),
+        commandBus,
+        queryBus,
+        // Built over this recorded log by the `eventProcessor` below, so fixture() sees it as recorded.
+        processor: handler.processor as EventProcessor<UnitOfWork, typeof eventStore>,
+      })),
     })
     started.push(running)
     return running

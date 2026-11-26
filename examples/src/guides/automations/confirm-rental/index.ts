@@ -4,7 +4,7 @@ import type { Notifications } from "./notifications"
 
 /** The rentals of one customer stay in order; different customers are notified side by side. */
 const byCustomer = (event: EventMessage) =>
-  event.tags.find((tag) => tag.key === "customerId")?.value ?? event.identifier
+  (event.payload as { customerId?: string }).customerId ?? event.identifier
 
 export const confirmRental = (
   notifications: Notifications,

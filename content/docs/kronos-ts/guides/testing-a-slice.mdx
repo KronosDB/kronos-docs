@@ -32,7 +32,7 @@ const commandBus = recordingCommandBus(localCommandBus(unitOfWork))
 const queryBus = localQueryBus(unitOfWork)
 ```
 
-`testInfrastructure()` returns three functions. `app(...slices)` passes the handlers of the slices a test gives it to `kronos()`, with the same wrappers and infrastructure as `main.ts`, and stops the app after the file's last test. `eventProcessor` is the function a read model slice takes, applied to the test's stores:
+`testInfrastructure()` returns three functions. `app(handlers)` takes one set of the three lists, a slice's or a context's, and passes them to `kronos()` with the same wrappers and infrastructure as `main.ts`, and stops the app after the file's last test. `eventProcessor` is the function a read model slice takes, applied to the test's stores:
 
 ```ts
 eventProcessor: (name: string) =>
