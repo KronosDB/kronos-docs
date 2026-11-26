@@ -62,7 +62,6 @@ const toolRented: EventMessage = {
   payload: { toolId: "t-1", customerId: "ada" },
   metadata: {},
   timestamp: Date.now(),
-  tags: [{ key: "toolId", value: "t-1" }],
 }
 
 const delivered: SequencedEventMessage = { ...toolRented, sequence: 42n }

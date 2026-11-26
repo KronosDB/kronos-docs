@@ -64,10 +64,10 @@ const tuned = polling(batched(inventoryView, 200), 250)
 A **sequence** groups events that must be handled in order. It is a function from an event to a string, and events with the same string are always handled in log order. Events with different strings have no order between them. The usual choice is one sequence per tool, customer or other entity.
 
 ```ts
-const byToolId: Sequence = (event) => event.tags.find((entry) => entry.key === "toolId")?.value ?? event.identifier
+const byToolId: Sequence = (event) => (event.payload as { toolId?: string }).toolId ?? event.identifier
 ```
 
-A store may return events without their tags, as Axon Server does. The processor then fills `event.tags` from the `tags` record of the handler's descriptor before it calls the sequence function or the handler, so the function above works on every store.
+An event carries no tags, so a sequence function reads the payload, as the function above does. An event with no tool id falls back to its own identifier and has a sequence of its own.
 
 A processor with none of `concurrent`, `deadLettering` or `segmented` handles one event at a time in log order, whatever its sequences. Each of the three takes the sequence function and uses it for something different. `concurrent` runs the sequences of a batch at the same time, each in log order. `deadLettering` parks a failed event and the later events of its sequence. `segmented` assigns each sequence to one segment. Pass the same function to all of them: a different second function throws at construction.
 

@@ -3,9 +3,9 @@ title: Versioning
 description: How events change shape over time without rewriting the log, using event versions and upcasting.
 ---
 
-Events are stored forever, so an event written last year is read by the code you deploy today. When the shape of an event changes, the stored events keep the old shape, and **upcasting** converts each one to the current shape as it is read. An upcast is a function from a stored event to an event, applied by an event store wrapper to everything that store returns. Handlers, states and processors receive only the current shape, and the log is never rewritten.
+Events are stored forever, so an event written last year is read by the code you deploy today. When the shape of an event changes, the stored events keep the old shape, and **upcasting** converts each one to the current shape as it is read. An upcast is declared from one event descriptor to another, and an event store wrapper applies it to everything that store returns. Handlers, states and processors receive only the current shape, and the log is never rewritten.
 
-In the tool store, `ToolAdded` first recorded a tool id, a model and a name. Later each tool gets a category. Every `ToolAdded` already in the log lacks the category, and every new one has it. This page declares the two shapes as two versions of one event, writes the upcast that turns the first into the second, and wraps the event store with it.
+In the tool store, `ToolAdded` first recorded a tool id, a model and a name. Later each tool gets a category. Every `ToolAdded` already in the log lacks the category, and every new one has it. This page declares the two shapes as two versions of one event, declares the upcast from the first to the second, and wraps the event store with it.
 
 ## Event versions
 
@@ -37,78 +37,67 @@ export const ToolAdded = ns.event("ToolAdded", {
 
 The current descriptor is the one that handlers, states and `ctx.append` use from now on. New events are stored as version 2.0.
 
-## Writing an upcast
+## Declaring an upcast
 
-An `Upcast` takes an `EventMessage` and returns an `EventMessage`. It works on the message that handlers receive, with its payload, tags, metadata and timestamp, and not on the stored bytes. `is(event, descriptor)` is the test: it is true when the event has the name and the version of the descriptor, and it narrows `event.payload` to the schema of that descriptor. An upcast that does not apply to an event returns it unchanged.
+`upcast(from, to, map)` declares one step from the descriptor `from` to the descriptor `to`. `map` receives the stored payload, typed by the schema of `from`, and the stored event as its second argument, for its metadata and timestamp. It returns the payload of `to`, typed by the schema of `to`. The store sets the name and the version of the event from `to`.
 
 ```ts
-export const addCategory: Upcast = (event) => {
-  if (is(event, ToolAddedV1)) {
-    return {
-      ...event,
-      version: ToolAdded.version,
-      payload: { ...event.payload, category: "uncategorized" },
-    }
-  }
-  return event
-}
+export const addCategory = upcast(ToolAddedV1, ToolAdded, (payload) => ({ ...payload, category: "uncategorized" }))
 ```
 
-The new version is read from the current descriptor, `ToolAdded.version`, so the number is written in one place. The payload is typed as the 1.0 shape inside the branch, so a misspelt field is a compile error. The function receives every event that the store reads, of every type, and the `is` test lets the others pass through. An upcast returns exactly one event for each event it receives: it cannot drop an event or turn one into several.
+The payload is typed as the 1.0 shape, so a misspelt field is a compile error, and the result has to be the 2.0 shape. An upcast returns exactly one event for each event it is applied to: it cannot drop an event or turn one into several. An event that no upcast is declared from is handed back as it is.
 
-Tags are not computed again. They are how the event was indexed when it was appended, and the reads that found it were matched against them, so an upcast that changed them would make the event disagree with the query that returned it. An upcast does not change an event's tags. A field that is added to a payload cannot become a tag for events that were stored without it.
+An upcast cannot change what an event is found by. Tags were written when the event was appended, and the reads that found it were matched against them. A field that is added to a payload cannot become a tag for events that were stored without it.
 
 ### Several versions
 
-Compose upcasts as functions, in order from the oldest version. Each one handles one step and returns every other event unchanged, so an event is converted by the step that matches its stored version and by each later step, and the result has the current version.
+List one upcast per step, from 1.0 to 2.0 and from 2.0 to 3.0. An event goes through every step that applies to it, whatever order the steps are listed in, so an event stored as 1.0 is handed out as 3.0. Here `ToolAddedV2` is the 2.0 descriptor and `ToolAdded` is the 3.0 one.
 
 ```ts
-// Oldest step first. An event is converted starting at the step that matches its stored version.
-const upcast: Upcast = (event) => toolAddedV3(toolAddedV2(event))
+// One upcast per step. An event goes through every step that applies to it.
+const toV2 = upcast(ToolAddedV1, ToolAddedV2, (payload) => ({ ...payload, category: "uncategorized" }))
+const toV3 = upcast(ToolAddedV2, ToolAdded, (payload) => payload)
 ```
+
+There is at most one upcast from a descriptor. Two upcasts from the same descriptor, or steps that lead back to the descriptor they started from, make `upcastingEventStore` throw when the store is built.
 
 ## Wrapping the event store
 
-`upcastingEventStore(store, upcast, options?)` returns a store of the same type as the one it wraps, with every read passed through the upcast. You wrap the store where the application is assembled, and handlers, states and processors use the wrapped store.
+`upcastingEventStore(store, upcasts)` takes the list of upcasts and returns a store of the same type as the one it wraps, with every read passed through them. You wrap the store where the application is assembled, and handlers, states and processors use the wrapped store.
 
 ```ts
 const log = inMemoryEventStore()
-const eventStore = upcastingEventStore(log, addCategory)
+const eventStore = upcastingEventStore(log, [addCategory])
 ```
 
-Reads by states and by processors both go through the upcast. Appends go to the wrapped store as they are, and a snapshotting or scheduling store inside the wrapper keeps working.
+Reads by states and by processors both go through the upcasts. Appends go to the wrapped store as they are, and a snapshotting or scheduling store inside the wrapper keeps working.
 
 ### What is stored
 
-Nothing about the stored events changes. The event is in the log as version 1.0 for as long as the log exists, and every read converts it again. Changing an upcast takes effect on the next read of every event, with nothing to migrate. Keep an upcast a pure function of the event, with no I/O and no clock, because it runs on every read of an old event.
+Nothing about the stored events changes. The event is in the log as version 1.0 for as long as the log exists, and every read converts it again. Changing an upcast takes effect on the next read of every event, with nothing to migrate. Keep `map` a pure function of the event, with no I/O and no clock, because it runs on every read of an old event.
 
 A handler wrapped in `validatingHandler` checks its payload against the current schema, and it receives the event after the upcast, so a 1.0 event is validated in its 2.0 form. [Interception and validation](/docs/kronos-ts/interception-and-validation) covers `validatingHandler`.
 
 ## Renaming an event
 
-An upcast can change the name of an event as well as its payload. The log keeps the name that each event was written under, and the code uses the current name, so a reader that filters by type needs the list of stored names that upcast to the current name.
+An upcast whose two descriptors have different names renames the event. The log keeps the name that each event was written under, and the code uses the current name. Declare the stored name as a descriptor and the upcast from it to the current one, and no other declaration is needed.
 
 ```ts
-export const lapsedRentals: Upcast = (event) =>
-  event.name.namespace === storedName.namespace && event.name.name === storedName.name
-    ? { ...event, name: RentalLapsed.name, version: RentalLapsed.version }
-    : event
-
-export const storedTypes = (type: string) =>
-  type === "toolstore.RentalLapsed" ? [type, "toolstore.RentalOverdue"] : [type]
+// What the log holds from before the event was renamed.
+export const RentalOverdue = ns.event("RentalOverdue", {
+  version: "1.0",
+  payload: z.object({ toolId: z.string(), customerId: z.string() }),
+  tags: { toolId: (payload) => payload.toolId, customerId: (payload) => payload.customerId },
+})
 ```
-
-The example renames `RentalOverdue` to `RentalLapsed`. The `storedTypes` option of `upcastingEventStore` receives the type a read or stream filters on and returns the stored names that upcast to it, the type itself included when events are still written under it.
 
 ```ts
-const eventStore = upcastingEventStore(log, lapsedRentals, { storedTypes })
+export const lapsedRentals = upcast(RentalOverdue, RentalLapsed, (payload) => payload)
 ```
 
-The wrapper uses `storedTypes` wherever the log is filtered by type: a processor's stream, a state's read, and the append condition of a command. A processor that handles `RentalLapsed` receives the events stored as `RentalOverdue`, converted. A state that folds `RentalLapsed` reads them too, and an append conditioned on `RentalLapsed` conflicts with an event appended under the old name.
+The example renames `RentalOverdue` to `RentalLapsed`. Where a read, a processor's stream or an append condition names `RentalLapsed`, the store reads the log for `RentalOverdue` as well. A processor that handles `RentalLapsed` receives the events stored as `RentalOverdue`, converted. A state that folds `RentalLapsed` reads them too, and an append conditioned on `RentalLapsed` conflicts with an event appended under the old name.
 
-Without `storedTypes`, the wrapper cannot translate a type filter, so it drops it. Reads and streams still return only the requested types, after upcasting, but they read every event that matches the tags. An append condition checks every event that carries its tags, whatever its type, so it can report conflicts that a type filter would have excluded. An upcast that changes only the version or the payload keeps the name, and `(type) => [type]` is the value to pass for it, which keeps the type filter.
-
-A store that returns events without their tags, as Axon Server does, leaves the wrapper only the type to narrow a read by. That is enough for a read whose query has one item, which is the query of most states. A state scoped by several tags, folding events that carry different ones of them, reads with a query whose items differ in tags and in types. Over such a store that read needs `storedTypes`; without it the read fails with an error that says so.
+A read whose query has several items is refused with an error when one stored name is upcast to types that items with different tags select. Read those items with separate queries.
 
 ## Snapshots and read models
 
@@ -118,7 +107,7 @@ A read model that an event handler built before the change keeps what the handle
 
 ## Errors
 
-An upcast that throws fails the read that reached the event: the command that loaded a state fails, and a processor handles it as any handler failure. An event with no upcast and the wrong shape for the code reaches the handler as stored, and nothing reports it unless the handler is wrapped in `validatingHandler`.
+An upcast that throws fails the read that reached the event: the command that loaded a state fails, and a processor handles it as any handler failure. An event with no upcast declared from its descriptor and the wrong shape for the code reaches the handler as stored, and nothing reports it unless the handler is wrapped in `validatingHandler`. `upcastingEventStore` throws when two upcasts are declared from one descriptor or when steps lead back to their start, and a read with several items is refused with an error when it cannot determine which item an upcast event was read for.
 
 ## Related
 

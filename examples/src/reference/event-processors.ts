@@ -16,7 +16,7 @@ import {
   tagsOf,
   unitOfWork,
   withNamespace,
-  type EventMessage,
+  type TaggedEvent,
   type Sequence,
 } from "@kronos-ts/core"
 import { z } from "zod"
@@ -47,20 +47,22 @@ export const markRented = eventHandler(ToolRented, ({ payload }) => {
 // Events written before any processor exists
 const eventStore = inMemoryEventStore()
 
-async function record(event: EventMessage) {
-  await eventStore.append([event])
+async function record(tagged: TaggedEvent) {
+  await eventStore.append([tagged])
 }
 
-function toolAdded(toolId: string, model: string, name: string): EventMessage {
+function toolAdded(toolId: string, model: string, name: string): TaggedEvent {
   const payload = { toolId, model, name }
   return {
-    kind: "event",
-    identifier: crypto.randomUUID(),
-    name: ToolAdded.name,
-    version: ToolAdded.version,
-    payload,
-    metadata: emptyMetadata(),
-    timestamp: Date.now(),
+    event: {
+      kind: "event",
+      identifier: crypto.randomUUID(),
+      name: ToolAdded.name,
+      version: ToolAdded.version,
+      payload,
+      metadata: emptyMetadata(),
+      timestamp: Date.now(),
+    },
     tags: tagsOf(ToolAdded, payload, emptyMetadata()),
   }
 }
@@ -72,7 +74,7 @@ await record(toolAdded("t-2", "D24000", "Tile saw"))
 const inventoryView = eventProcessor("inventory-view", eventStore, inMemoryTokenStore(), unitOfWork)
 
 // Wrappers return a new value; they compose in any order
-const byToolId: Sequence = (event) => event.tags.find((entry) => entry.key === "toolId")?.value ?? event.identifier
+const byToolId: Sequence = (event) => (event.payload as { toolId?: string }).toolId ?? event.identifier
 
 const tuned = polling(batched(inventoryView, 200), 250)
 const sideBySide = concurrent(tuned, byToolId)

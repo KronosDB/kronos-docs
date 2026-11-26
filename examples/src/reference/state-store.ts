@@ -8,7 +8,7 @@ import {
   isConflict,
   tagsOf,
   withNamespace,
-  type EventMessage,
+  type TaggedEvent,
 } from "@kronos-ts/core"
 import { z } from "zod"
 
@@ -22,16 +22,18 @@ const ToolRented = ns.event("ToolRented", {
   },
 })
 
-function toolRented(toolId: string, customerId: string): EventMessage {
+function toolRented(toolId: string, customerId: string): TaggedEvent {
   const payload = { toolId, customerId }
   return {
-    kind: "event",
-    identifier: generateIdentifier(),
-    name: ToolRented.name,
-    version: ToolRented.version,
-    payload,
-    metadata: emptyMetadata(),
-    timestamp: Date.now(),
+    event: {
+      kind: "event",
+      identifier: generateIdentifier(),
+      name: ToolRented.name,
+      version: ToolRented.version,
+      payload,
+      metadata: emptyMetadata(),
+      timestamp: Date.now(),
+    },
     tags: tagsOf(ToolRented, payload, emptyMetadata()),
   }
 }

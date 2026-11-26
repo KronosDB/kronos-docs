@@ -27,7 +27,7 @@ export const ToolRented = ns.event("ToolRented", {
 })
 
 const byCustomerId: Sequence = (event) =>
-  event.tags.find((entry) => entry.key === "customerId")?.value ?? event.identifier
+  (event.payload as { customerId?: string }).customerId ?? event.identifier
 
 const handled: Array<{ node: string; customerId: string }> = []
 
@@ -60,13 +60,15 @@ async function rent(toolId: string, customerId: string) {
   const payload = { toolId, customerId }
   await eventStore.append([
     {
-      kind: "event",
-      identifier: crypto.randomUUID(),
-      name: ToolRented.name,
-      version: ToolRented.version,
-      payload,
-      metadata: emptyMetadata(),
-      timestamp: Date.now(),
+      event: {
+        kind: "event",
+        identifier: crypto.randomUUID(),
+        name: ToolRented.name,
+        version: ToolRented.version,
+        payload,
+        metadata: emptyMetadata(),
+        timestamp: Date.now(),
+      },
       tags: tagsOf(ToolRented, payload, emptyMetadata()),
     },
   ])

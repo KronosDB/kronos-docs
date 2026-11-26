@@ -1,11 +1,11 @@
 ---
 title: Change an event's shape
-description: Add a field to ToolAdded with an upcaster so that events already in the log stay readable, and invalidate the snapshots that the change affects.
+description: Add a field to ToolAdded with an upcast so that events already in the log stay readable, and invalidate the snapshots that the change affects.
 ---
 
 By the end of this guide `ToolAdded` carries a `category`, new events are written with it, and the events that were stored before the change still load, because they are converted to the new shape every time they are read. You need an application that already has `ToolAdded` events in its log, such as the tool store from the previous guides, and an event store that you can wrap.
 
-The log is never rewritten. An **upcaster** converts a stored event when the event store returns it, for every reader, as described on [Versioning](/docs/kronos-ts/versioning).
+The log is never rewritten. An **upcast** converts a stored event when the event store returns it, for every reader, as described on [Versioning](/docs/kronos-ts/versioning).
 
 ## Declare both versions
 
@@ -27,38 +27,27 @@ export const ToolAdded = ns.event("ToolAdded", {
 })
 ```
 
-Both descriptors have the qualified name `toolstore.ToolAdded`. `ToolAddedV1` exists only so that the upcaster can match old events and type their payload. Nothing appends or handles it. The `AddTool` command gains the same `category` field, so that `ctx.append(ToolAdded, payload)` has a value for it.
+Both descriptors have the qualified name `toolstore.ToolAdded`. `ToolAddedV1` exists only so that the upcast can start from the old version and type its payload. Nothing appends or handles it. The `AddTool` command gains the same `category` field, so that `ctx.append(ToolAdded, payload)` has a value for it.
 
-## Write the upcaster
+## Declare the upcast
 
-An upcaster is a function from an event to an event. It converts the events it matches and returns every other event unchanged. `is(event, descriptor)` matches on kind, name and version, and types `event.payload` as that descriptor's payload.
+`upcast(from, to, map)` declares a step from one descriptor to another. `map` receives the stored payload, typed as the payload of `from`, and returns the payload of `to`. The store sets the name and the version of the event from `to`. An event that no upcast is declared from is returned as it is.
 
 ```ts
-export const categoryAdded: Upcast = (event) => {
-  if (is(event, ToolAddedV1)) {
-    return { ...event, version: ToolAdded.version, payload: { ...event.payload, category: "uncategorised" } }
-  }
-  return event
-}
+export const categoryAdded = upcast(ToolAddedV1, ToolAdded, (payload) => ({ ...payload, category: "uncategorised" }))
 ```
 
-The value `"uncategorised"` is a business decision: the category of a tool that was added before categories existed. Every old event reads as that value from now on. An upcaster changes the payload and the version, not the event's tags.
+The value `"uncategorised"` is a business decision: the category of a tool that was added before categories existed. Every old event reads as that value from now on. An upcast changes the payload and the version, not what the event is found by: its tags were written when it was appended.
 
 ## Wrap the event store
 
-`upcastingEventStore(store, upcast, options)` returns a store that applies the upcaster to everything it reads, for command handlers and processors alike. Wrap the store once and give the wrapped store to every command handler entry and every processor.
+`upcastingEventStore(store, upcasts)` returns a store that applies the upcasts to everything it reads, for command handlers and processors alike. Wrap the store once and give the wrapped store to every command handler entry and every processor.
 
 ```ts
-const eventStore = upcastingEventStore(inMemorySnapshottingEventStore(log), categoryAdded, {
-  storedTypes: (type) => [type],
-})
+const eventStore = upcastingEventStore(inMemorySnapshottingEventStore(log), [categoryAdded])
 ```
 
-The `storedTypes` option returns, for a type that a processor handles, a state folds or an append condition names, the names events of that type are stored under. This upcaster keeps the name, so a type maps to itself. If a later change renames an event, list the old name in the result, for example `(type) => (type === "toolstore.ToolRegistered" ? [type, "toolstore.ToolAdded"] : [type])`, and a state that folds `ToolRegistered` reads the events stored as `ToolAdded` through the upcaster.
-
-Without the option, reads and streams still return the right events, but they read every event that carries the same tags. An append condition then checks every event with its tags, whatever its type, so a command can report a conflict that the type filter would have excluded.
-
-When the store is also a snapshotting store, put the upcasting wrapper outermost, as above. With Postgres that reads `upcastingEventStore(postgresSnapshottingEventStore(postgresEventStore(pg), pg, serializer), categoryAdded, { storedTypes: (type) => [type] })`. Then the handlers and the processor use the new shape with no other edit.
+When the store is also a snapshotting store, put the upcasting wrapper outermost, as above. With Postgres that reads `upcastingEventStore(postgresSnapshottingEventStore(postgresEventStore(pg), pg, serializer), [categoryAdded])`. Then the handlers and the processor use the new shape with no other edit.
 
 ```ts
 const inventoryView = eventProcessor("inventory-view", eventStore, inMemoryTokenStore(), unitOfWork)
@@ -66,7 +55,7 @@ const inventoryView = eventProcessor("inventory-view", eventStore, inMemoryToken
 
 ## Check the snapshot keys
 
-A snapshot is a cached state, stored under a key that you choose. Upcasting converts events, not cached states, so a snapshot folded before the change is not converted. The `Tool` state was cached under `"tool-v1"` and now reads `category`, so raise its key to `"tool-v2"`. The next load folds the events again through the upcaster.
+A snapshot is a cached state, stored under a key that you choose. Upcasting converts events, not cached states, so a snapshot folded before the change is not converted. The `Tool` state was cached under `"tool-v1"` and now reads `category`, so raise its key to `"tool-v2"`. The next load folds the events again through the upcast.
 
 ```ts
   "tool-v2",
@@ -77,7 +66,7 @@ Raise the key whenever the change touches what a state computes. A state that do
 
 ## Change the event again
 
-The next change adds a `ToolAddedV2` descriptor for the shape from this guide and a new current version. Write a second upcaster for `ToolAddedV2` and compose the two, oldest first, because an event written at 1.0 must pass through both: `(event) => latestUpcaster(categoryAdded(event))`.
+The next change adds a `ToolAddedV2` descriptor for the shape from this guide and a new current version. Declare a second upcast from `ToolAddedV2` to the new descriptor and list it beside the first: `upcastingEventStore(store, [categoryAdded, latestUpcast])`. An event written at 1.0 goes through both steps, whatever order they are listed in.
 
 ## Checking it works
 
@@ -102,6 +91,6 @@ read    2.0  {"toolId":"t-1","model":"DCD791","name":"Cordless drill","category"
 
 ## Related
 
-- [Versioning](/docs/kronos-ts/versioning) describes upcasting, versions and the `storedTypes` option.
+- [Versioning](/docs/kronos-ts/versioning) describes upcasting, versions and renaming an event.
 - [Snapshots](/docs/kronos-ts/snapshots) describes snapshot keys, policies and the structural check.
 - [State and consistency](/docs/kronos-ts/state) describes the states that read the events.

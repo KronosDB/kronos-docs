@@ -26,13 +26,15 @@ for (const toolId of ["t-1", "t-2"]) {
   const payload = { toolId, customerId: "ada" }
   await eventStore.append([
     {
-      kind: "event",
-      identifier: generateIdentifier(),
-      name: ToolRented.name,
-      version: ToolRented.version,
-      payload,
-      metadata: emptyMetadata(),
-      timestamp: Date.now(),
+      event: {
+        kind: "event",
+        identifier: generateIdentifier(),
+        name: ToolRented.name,
+        version: ToolRented.version,
+        payload,
+        metadata: emptyMetadata(),
+        timestamp: Date.now(),
+      },
       tags: tagsOf(ToolRented, payload, emptyMetadata()),
     },
   ])

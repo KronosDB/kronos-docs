@@ -40,7 +40,7 @@ To create the tables with your own migration tool, pass `bootstrap: false` and r
 
 The package exports one DDL builder per table and index, such as `buildEventsTableDDL(DEFAULT_TABLE_NAMES)`, and `bootstrapSchema(pool)` runs all of them. It takes a `postgresPool` or an adapter, anything with a `transaction` method. A statement runs under the `statementTimeoutMs` of the adapter, which is off by default.
 
-An append inserts its events with one statement per 100 events, in the order given and inside the append's transaction. Appends to the same tag take that tag's advisory lock one after the other. Both commit unless the second one has a condition, and its condition finds the first one's event after its marker, which fails it with `AppendConditionError`.
+An append inserts its events with one statement per 100 events, in the order given and inside the append's transaction. An append takes an advisory lock on every tag and every event type it writes, and on the tags or types its condition reads by, so appends that share a tag or a type run one after the other and appends that share neither run side by side. Both of two such appends commit unless the second one has a condition, and its condition finds the first one's event after its marker, which fails it with `AppendConditionError`. A condition whose query has an item with neither a tag nor a type matches every event, and an append with such a condition is refused with an error.
 
 ## Compose the stores
 
@@ -177,7 +177,7 @@ When the handler runs inside `otlpHandler`, each statement on `ctx.sql()` is rec
   }}
 />
 
-`start()` retries a failed connect with exponential backoff and throws the last error when the attempts run out. Set the policy with the pool's `resilience` option: `maxAttempts` (default 10), `initialDelayMs` (100), `maxDelayMs` (30000), `isRetryable` to give up at once on an error that retrying cannot fix, and `log`, called before each retry and writing to `console.warn` when you give none. Pass `log: () => {}` to silence it. The policy covers start-up only, so a later lost connection is an `unavailable` error.
+`start()` connects and creates the tables again, with exponential backoff, only after an error that reports the server could not be reached or cannot serve yet, such as a refused connection, a timeout, or a server that is starting up or out of connections. An error another attempt cannot fix, such as a wrong password or a missing permission, fails `start()` at once. When the attempts run out, `start()` throws the last error. Set the policy with the pool's `resilience` option: `maxAttempts` (default 10), `initialDelayMs` (100), `maxDelayMs` (30000), `isRetryable`, which decides which errors are tried again when you give it, and `log`, called before each retry and writing to `console.warn` when you give none. Pass `log: () => {}` to silence it. The policy covers start-up only, so a later lost connection is an `unavailable` error.
 
 `pgAdapter` takes `connectionString`, `poolConfig` (the `pg.Pool` options, such as `max`, with a default pool size of 10) and the two timeouts above. The other adapters take `connectionString` and the timeouts.
 
@@ -231,7 +231,7 @@ The scheduling worker's interval and batch size are set with `polling(store, ms)
 | --- | --- |
 | `AppendConditionError` from an append, with `isConflict(error)` true | The events the command depended on changed, and nothing was written. Retry the command. A repeated event identifier fails the same way. |
 | An error marked `unavailable`, with `isUnavailable(error)` true | The server is unreachable, shutting down, out of connections, or a timeout fired. Retry later. |
-| `start()` throws the last connection error | The database was not reachable within the retry policy. Check the connection string and the server. |
+| `start()` throws the last connection error | The database was not reachable within the retry policy, or the server refused the login or a permission at once. Check the connection string, the credentials, the role's permissions and the server. |
 | `postgresPool: statementTimeoutMs cannot be set on a pool built from an adapter` | `idleInTransactionTimeoutMs` or `statementTimeoutMs` was passed beside an adapter. Set it on the adapter, as in `pgAdapter({ connectionString, statementTimeoutMs })`. |
 | `postgresPool: no connection yet` | A statement ran before `start()` resolved. Await `start()`. |
 | An error naming `postgresUnitOfWork` | A token store, dead-letter queue, schedule call or `postgresTransaction` got a unit of work without a Postgres transaction. Build the command bus and the processors from `postgresUnitOfWork`. |

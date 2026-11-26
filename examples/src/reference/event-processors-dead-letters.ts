@@ -33,7 +33,7 @@ export const ToolRented = ns.event("ToolRented", {
 
 // One lane per customer: a customer's events stay in order, other customers carry on
 const byCustomerId: Sequence = (event) =>
-  event.tags.find((entry) => entry.key === "customerId")?.value ?? event.identifier
+  (event.payload as { customerId?: string }).customerId ?? event.identifier
 
 // A handler that fails until the customer record it needs exists
 const knownCustomers = new Set<string>()
@@ -70,13 +70,15 @@ async function rent(toolId: string, customerId: string) {
   const payload = { toolId, customerId }
   await eventStore.append([
     {
-      kind: "event",
-      identifier: crypto.randomUUID(),
-      name: ToolRented.name,
-      version: ToolRented.version,
-      payload,
-      metadata: emptyMetadata(),
-      timestamp: Date.now(),
+      event: {
+        kind: "event",
+        identifier: crypto.randomUUID(),
+        name: ToolRented.name,
+        version: ToolRented.version,
+        payload,
+        metadata: emptyMetadata(),
+        timestamp: Date.now(),
+      },
       tags: tagsOf(ToolRented, payload, emptyMetadata()),
     },
   ])
@@ -122,7 +124,6 @@ await standalone.enqueue(
       payload: { toolId: "t-3", customerId: "grace" },
       metadata: emptyMetadata(),
       timestamp: Date.now(),
-      tags: [{ key: "customerId", value: "grace" }],
     },
     new Error("customer grace is not registered"),
     "grace",
@@ -152,7 +153,6 @@ const failed = (sequenceIdentifier: string) =>
       payload: { toolId: "t-1", customerId: sequenceIdentifier },
       metadata: emptyMetadata(),
       timestamp: Date.now(),
-      tags: [],
     },
     new Error("failed"),
     sequenceIdentifier,

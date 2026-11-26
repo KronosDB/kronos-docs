@@ -42,7 +42,7 @@ The second argument of a handler is its context. It belongs to one invocation, s
 
 | Member | What it does |
 | --- | --- |
-| `load(state, id)` | Reads the events a state needs, folds them, and returns the state. The append at commit fails if a matching event has been appended since the read. Events you append are folded into a loaded state, so a later `load` includes them. |
+| `load(state, id)` | Reads the events a state needs, folds them, and returns the state. The append at commit fails if a matching event has been appended since the read. A `load` after an `append` in the same handler includes the events appended so far, for every state whose query matches them. |
 | `append(event, payload, metadata?)` | Creates an event from a descriptor and a payload, derives its tags, and buffers it. `append([[event, payload], ...])` buffers several. All buffered events are written in one append at commit. |
 | `send(command, payload, metadata?)` | Sends another command and returns its result. |
 | `query(query, payload, metadata?)` | Sends a query and returns its result. |

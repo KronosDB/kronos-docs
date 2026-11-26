@@ -13,7 +13,7 @@ import {
   tagsOf,
   unitOfWork,
   upcastingEventStore,
-  type EventMessage,
+  type TaggedEvent,
 } from "@kronos-ts/core"
 import { z } from "zod"
 import { AddTool, GetInventory, ToolAddedV1 } from "./descriptors.js"
@@ -22,17 +22,17 @@ import { categoryAdded } from "./upcast.js"
 import { waitFor } from "./wait-for.js"
 
 // Events as they were stored before the change, in the 1.0 shape.
-function storedBeforeTheChange(payload: z.output<typeof ToolAddedV1.payload>): EventMessage {
-  return {
-    kind: "event",
+function storedBeforeTheChange(payload: z.output<typeof ToolAddedV1.payload>): TaggedEvent {
+  const event = {
+    kind: "event" as const,
     identifier: generateIdentifier(),
     name: ToolAddedV1.name,
     version: ToolAddedV1.version,
     payload,
     metadata: emptyMetadata(),
     timestamp: Date.now(),
-    tags: tagsOf(ToolAddedV1, payload, emptyMetadata()),
   }
+  return { event, tags: tagsOf(ToolAddedV1, payload, emptyMetadata()) }
 }
 
 const log = inMemoryEventStore()
@@ -41,9 +41,7 @@ await log.append([
   storedBeforeTheChange({ toolId: "t-2", model: "D24000", name: "Tile saw" }),
 ])
 
-const eventStore = upcastingEventStore(inMemorySnapshottingEventStore(log), categoryAdded, {
-  storedTypes: (type) => [type],
-})
+const eventStore = upcastingEventStore(inMemorySnapshottingEventStore(log), [categoryAdded])
 
 const commandBus = localCommandBus(unitOfWork)
 const queryBus = localQueryBus(unitOfWork)

@@ -44,10 +44,9 @@ The first parameter is the event as it was stored, plus its position in the log.
 | `payload` | The event's data, typed from the descriptor's schema. |
 | `metadata` | The key-value metadata the event was appended with, such as a correlation id. |
 | `timestamp` | When the event was created, in milliseconds since the epoch. Always present on a stored event. |
-| `tags` | The tags the event carries, as `{ key, value }` entries. |
 | `sequence` | The event's position in the log, as a `bigint`. |
 
-Events carry the tags the descriptor declared, as covered in [Messages](/docs/kronos-ts/messages). A handler that needs the tag values reads them from `tags`; a handler that needs the identity of the thing the event is about usually reads it from the payload.
+An event carries no tags. They are the index the event was appended under, as covered in [Messages](/docs/kronos-ts/messages#tags), and a handler that needs the identity of the thing the event is about reads it from the payload.
 
 ## The handler context
 

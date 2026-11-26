@@ -82,7 +82,7 @@ The result schema types the value the caller receives. A handler wrapped in `val
 
 ## Tags
 
-A tag is a key and a value attached to an event, such as `toolId` = `t-1`. Tags select the events a decision depends on: a state reads the events whose tags match, and the append that records the decision succeeds only if no event matching that selection has been appended since the state read it. [State and consistency](/docs/kronos-ts/state) explains that; this section covers how an event gets its tags.
+A tag is a key and a value an event is appended under, such as `toolId` = `t-1`. Tags are the event store's index: they define what an event can be searched by, and they select the events a decision depends on: a state reads the events whose tags match, and the append that records the decision succeeds only if no event matching that selection has been appended since the state read it. [State and consistency](/docs/kronos-ts/state) explains that; this section covers how an event gets its tags.
 
 An event descriptor declares its tags as a record. Each key is a tag key. Each value is a function that receives the payload and the metadata the event is created with, and returns a string, an array of strings, or `undefined`:
 
@@ -102,7 +102,9 @@ export const ToolsRented = ns.event("ToolsRented", {
 })
 ```
 
-An event can have several tags, and one key can produce several. An array produces one tag per value under the same key, so `ToolsRented` for two tools carries two `toolId` tags. `undefined` and an empty array produce no tag for that key on that event, which is how a tag can be conditional. The functions run once, when `ctx.append` creates the event, and the resulting tags are stored with it. A function that returns an empty string makes `ctx.append` throw, because a tag key and a tag value must not be empty.
+An event can have several tags, and one key can produce several. An array produces one tag per value under the same key, so `ToolsRented` for two tools carries two `toolId` tags. `undefined` and an empty array produce no tag for that key on that event, which is how a tag can be conditional. The functions run once, when `ctx.append` creates the event, and the resulting tags are stored with it as the index entries of that event. A function that returns an empty string makes `ctx.append` throw, because a tag key and a tag value must not be empty.
+
+Tags are not a field of the event message. An event that a store returns, a handler or an evolver receives, a dead letter holds, or `ctx.source` returns carries no tags; a handler that needs the identity of the thing the event is about reads it from the payload. Code that calls a store directly gives the tags with the event, as `eventStore.append([{ event, tags }])`, and `tagsOf(descriptor, payload, metadata)` returns the tags a descriptor gives a payload.
 
 An event descriptor without a `tags` record produces events with no tags. A state that folds an event whose descriptor shares no tag key with the state's own tags fails at startup, as [State and consistency](/docs/kronos-ts/state) describes.
 

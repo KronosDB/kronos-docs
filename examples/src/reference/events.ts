@@ -123,13 +123,15 @@ const app = kronos({
 async function record<P extends StandardSchemaV1>(descriptor: EventDescriptor<P>, payload: InferOutput<P>) {
   await eventStore.append([
     {
-      kind: "event",
-      identifier: crypto.randomUUID(),
-      name: descriptor.name,
-      version: descriptor.version,
-      payload,
-      metadata: emptyMetadata(),
-      timestamp: Date.now(),
+      event: {
+        kind: "event",
+        identifier: crypto.randomUUID(),
+        name: descriptor.name,
+        version: descriptor.version,
+        payload,
+        metadata: emptyMetadata(),
+        timestamp: Date.now(),
+      },
       tags: tagsOf(descriptor, payload, emptyMetadata()),
     },
   ])

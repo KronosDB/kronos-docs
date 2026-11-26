@@ -114,7 +114,7 @@ const kronosDbStore = kronosDbSchedulingEventStore(kronosDbEventStore(kdb, "tool
 const pending = await kronosDbStore.listSchedules()
 ```
 
-`listSchedules()` returns the schedules that have not fired or been cancelled, soonest first. `scheduleIdempotent(event, at, token)` schedules under a token you choose, and a second call with the same token throws `ScheduleAlreadyExistsError`. `ctx.schedule` cannot take a token, so a retry of a command that scheduled arms the schedule twice unless the handler calls `scheduleIdempotent` on the store directly.
+`listSchedules()` returns the schedules that have not fired or been cancelled, soonest first. `scheduleIdempotent({ event, tags }, at, token)` schedules under a token you choose, and a second call with the same token throws `ScheduleAlreadyExistsError`. `ctx.schedule` cannot take a token, so a retry of a command that scheduled arms the schedule twice unless the handler calls `scheduleIdempotent` on the store directly.
 
 ## Errors
 

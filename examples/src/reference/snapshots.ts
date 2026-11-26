@@ -79,13 +79,15 @@ const app = kronos({
 
 if (import.meta.main) {
   const rentals = Array.from({ length: 150 }, (_, index) => ({
-    kind: "event" as const,
-    identifier: `rented-${index}`,
-    name: ToolRented.name,
-    version: ToolRented.version,
-    payload: { toolId: `t-${index}`, customerId: "ada" },
-    metadata: {},
-    timestamp: Date.now(),
+    event: {
+      kind: "event" as const,
+      identifier: `rented-${index}`,
+      name: ToolRented.name,
+      version: ToolRented.version,
+      payload: { toolId: `t-${index}`, customerId: "ada" },
+      metadata: {},
+      timestamp: Date.now(),
+    },
     tags: [
       { key: "toolId", value: `t-${index}` },
       { key: "customerId", value: "ada" },
