@@ -7,9 +7,11 @@ By the end of this guide a KronosDB node has liveness and readiness probes, a Pr
 
 ## Wire the probes
 
-`/health` is a liveness probe. It returns `ok` with status 200 for as long as the process is up. `/ready` is a readiness probe. It returns `ready` with status 200 only when a committed leader claim exists that this node can execute or forward writes to, and 503 with `not ready: native leader claim unavailable` during an election, catch-up or startup recovery.
+`/health` is a liveness probe. It returns `ok` with status 200 for as long as the process is up. `/ready` is a readiness probe. It returns `ready` with status 200 only when a committed leader claim exists that this node can execute or forward writes to and, on a follower, once it has caught up with the leader since it started. It returns 503 with `not ready: native leader claim unavailable` during an election or while a leader is taking over, and 503 with `not ready: catching up with the leader` on a follower that has a leader but does not hold the whole committed log yet. A rolling update or a node drain that waits for readiness therefore waits until the node it restarted holds its data again.
 
-In Kubernetes, use `/ready` for the startup probe as well, with a generous failure threshold, because a node recovering a large data directory is not ready for a while. The chart already sets these.
+In Kubernetes, use `/health` for the startup probe, with a generous failure threshold: the admin port opens only after the node has recovered its data directory, which takes a while for a large one. Keep `/ready` for readiness alone, as the chart does. A node that is waiting for a leader or catching up is not ready, and a startup probe on `/ready` would restart it for that.
+
+A node whose consensus component stops cannot vote or follow a leader. The server logs the reason at error level and exits with a non-zero status, so that its supervisor starts it again.
 
 ```yaml
 livenessProbe:
@@ -17,7 +19,7 @@ livenessProbe:
 readinessProbe:
   httpGet: { path: /ready, port: 9240 }
 startupProbe:
-  httpGet: { path: /ready, port: 9240 }
+  httpGet: { path: /health, port: 9240 }
   failureThreshold: 60
   periodSeconds: 5
 ```

@@ -3,7 +3,7 @@ title: Run a cluster
 description: Run three KronosDB voters with Docker Compose or the Helm chart, keep the context manifest in step across nodes, restart them one at a time, and watch a failover.
 ---
 
-This guide forms a cluster of three voters, which keeps accepting writes while any one of them is down. You get there with Docker Compose on one machine, or with the Helm chart on Kubernetes, and then restart the nodes one at a time and watch the cluster elect a new leader. You need the image `ghcr.io/kronosdb/kronosdb`, a token for the client port, and for Kubernetes a cluster with a storage class on local disks. [Replication](/docs/kronosdb/replication) explains how the nodes stay in step.
+This guide forms a cluster of three voters, which keeps accepting writes while any one of them is down. You get there with Docker Compose on one machine, or with the Helm chart on Kubernetes, and then restart the nodes one at a time and watch the cluster elect a new leader. You need the image `ghcr.io/kronosdb/kronosdb`, a token for the client port, and for Kubernetes a cluster with a storage class whose volumes outlive the node they are attached to. [Replication](/docs/kronosdb/replication) explains how the nodes stay in step.
 
 A single node is a cluster of one that elects itself. A cluster needs a majority of its voters to accept writes, so three voters tolerate one failure and five tolerate two. Even numbers add no tolerance. Each node has a numeric id that must stay the same across restarts, and the lowest id among the configured voters bootstraps the cluster on first start.
 
@@ -14,7 +14,7 @@ Each node needs its own id, a name, a data volume and the same peer list. The pe
 ```yaml
 # compose.yaml
 x-node: &node
-  image: ghcr.io/kronosdb/kronosdb:0.17.0
+  image: ghcr.io/kronosdb/kronosdb:0.18.0
   restart: unless-stopped
   stop_grace_period: 30s
   healthcheck:
@@ -72,7 +72,7 @@ volumes:
   node3-data:
 ```
 
-The image already sets the listen addresses, the data directory `/data` and the admin port, so the file only adds what differs per node. The healthcheck replaces the image's liveness check with `/ready`, which is 200 only when the node has a leader to forward writes to or holds the leadership itself. Compose waits for `stop_grace_period` before it kills a node, and the server needs the drain deadline of 20 seconds to close connections cleanly.
+The image already sets the listen addresses, the data directory `/data` and the admin port, so the file only adds what differs per node. The healthcheck replaces the image's liveness check with `/ready`, which is 200 only when the node holds the leadership itself, or has a leader to forward writes to and has caught up with it. Compose waits for `stop_grace_period` before it kills a node, and the server needs the drain deadline of 20 seconds to close connections cleanly.
 
 Create the manifest, then start the nodes with the two tokens set.
 
@@ -84,7 +84,7 @@ export KRONOSDB_ADMIN_TOKEN=$(openssl rand -hex 24)
 docker compose up -d
 ```
 
-All three nodes start at the same time. None of them is ready until a majority has connected to each other and elected a leader, which takes a few seconds.
+All three nodes start at the same time. A new cluster forms once every voter is up: the first node creates it only after each of the others has reported that it holds no data, so a node that lost its disk can never start a second cluster. None of them is ready before that, which takes a few seconds.
 
 ## Form the cluster with Helm
 
@@ -109,7 +109,7 @@ admin:
   authMode: token
   existingSecret: kronosdb-auth
 persistence:
-  storageClassName: local-nvme
+  storageClassName: gp3
   size: 100Gi
 serviceMonitor:
   enabled: true
@@ -119,12 +119,18 @@ alerts:
 
 ```sh
 helm install kronosdb oci://ghcr.io/kronosdb/charts/kronosdb \
-  --version 0.17.0 -f values.yaml
+  --version 0.18.0 -f values.yaml
 ```
 
 With the release named `kronosdb`, the pods are `kronosdb-0`, `kronosdb-1` and `kronosdb-2` with node ids 1, 2 and 3, and the services are `kronosdb` (clients on 50051) and `kronosdb-admin` (port 9240). The chart fails to render with admin token mode and no admin token, and prints a warning after install when the client port has no token, the admin port has no authentication, or `learners.replicas` is 0, which means there is no [passive-backup learner](/docs/kronosdb/backups#keep-a-passive-backup-learner).
 
-Choose local disks for the storage class. Each acknowledged write is already replicated to a majority, so a replicated network volume replicates each write twice. `serviceMonitor.enabled` adds a Prometheus Operator `ServiceMonitor` for `/metrics`, and `alerts.enabled` adds the `PrometheusRule` described in [Monitor a server](/docs/kronosdb/monitoring).
+Choose a storage class whose volumes outlive the node, such as a network block volume (`gp3` on AWS), so that a voter that is rescheduled comes back with its data. A voter that comes back with an empty disk has to copy the whole log from the leader again. Until it has, it does not vote and does not count towards a majority, so the cluster tolerates no further loss during that time: if a second voter stops, writes stop until it returns. The node logs a warning when it starts in this state, returns `not ready: catching up with the leader` from `/ready`, and rejoins by itself once it holds the log.
+
+A sync takes one to two milliseconds on `gp3` against about 0.1 ms on local NVMe, so each append takes a millisecond or two longer. Provisioning more IOPS does not shorten a sync. With `ack-mode = "auto"` the startup probe then selects written acks for a cluster, and setting `ack-mode = "durable"` keeps sync-before-ack at about half the peak throughput, as [Configuration](/docs/kronosdb/configuration) describes.
+
+On a cluster with several zones, set `zoneSpreadWhenUnsatisfiable: DoNotSchedule`, so that no zone holds two voters while another holds none and the loss of one zone leaves a majority. The default, `ScheduleAnyway`, only prefers an even spread. Keep a node autoscaler from moving voters with `podAnnotations`: `karpenter.sh/do-not-disrupt: "true"` for Karpenter, or `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"` for the cluster autoscaler. Run voters on nodes that are not spot capacity, because a spot reclaim does not wait for the disruption budget.
+
+`serviceMonitor.enabled` adds a Prometheus Operator `ServiceMonitor` for `/metrics`, and `alerts.enabled` adds the `PrometheusRule` described in [Monitor a server](/docs/kronosdb/monitoring).
 
 ## Keep the manifest the same on every node
 
@@ -134,9 +140,9 @@ In Compose, the nodes share the mounted `manifest` directory. A directory is mou
 
 ## Restart the nodes one at a time
 
-A restart is safe while the other two voters are ready. Restart the followers first and the leader last, and wait for all three nodes to be ready between steps.
+A restart is safe while the other two voters are ready. Restart the followers first and the leader last, and wait for all three nodes to be ready between steps. A leader that restarts does not resume as leader: it comes back as a voter, and the cluster elects a leader as after any leader loss.
 
-On Kubernetes the StatefulSet updates one pod at a time in reverse order and waits for each to be ready, because readiness means the node has a leader. The disruption budget protects the majority during node drains.
+On Kubernetes the StatefulSet updates one pod at a time in reverse order and waits for each to be ready, and readiness means the node has a leader and has caught up with it. The disruption budget protects the majority during node drains.
 
 ```sh
 kubectl rollout restart statefulset/kronosdb
@@ -185,7 +191,7 @@ Watch these signals, on `/metrics` of every node or through your Prometheus:
 - `kronosdb_native_write_gate_open` is 1 on the one node that may append locally. `max(kronosdb_native_write_gate_open)` across the cluster at 0 means no node can accept writes.
 - `kronosdb_native_epoch` rises by at least one for each new leader. A value that keeps rising means leadership keeps changing.
 - `kronosdb_replication_lag_events` is the number of events a node holds that a majority does not yet hold. It grows on a node that cannot keep up.
-- `/ready` returns 503 on a node without a leader and recovers when the claim is established. On Kubernetes this removes the pod from the client service for that time.
+- `/ready` returns 503 on a node without a leader, and on a restarted follower until it has caught up with the leader. On Kubernetes this removes the pod from the client service for that time, and holds a rolling update or a node drain until the pod is a whole replica again.
 
 The Cluster page of the console and `GET /api/v1/cluster` show the leader and each member's role. The console page lists the peers from the node's configuration, and the API reports the live membership.
 
