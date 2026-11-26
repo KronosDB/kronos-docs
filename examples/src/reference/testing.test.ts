@@ -55,25 +55,25 @@ describe("a command", () => {
       )
       .when(command(RentTool, { toolId: "t-12", customerId: "ada-12" }))
       .then(
-        result({ rented: true }),
+        result({ ok: true }),
         events(event(ToolRented, { toolId: "t-12", customerId: "ada-12" })),
       )
   })
 
-  it("refuses a duplicate tool by throwing", async () => {
+  it("throws for an id that already names another tool", async () => {
     await toolStoreFixture
       .given(event(ToolAdded, { toolId: "t-13", model: "DCD791", name: "Cordless drill" }))
-      .when(command(AddTool, { toolId: "t-13", model: "DCD791", name: "Cordless drill" }))
-      .then(error("already exists"), noEvents())
+      .when(command(AddTool, { toolId: "t-13", model: "D24000", name: "Tile saw" }))
+      .then(error("is already a DCD791"), noEvents())
   })
 
   it("matches an error by pattern or by predicate", async () => {
     const duplicate = () =>
       toolStoreFixture
         .given(event(ToolAdded, { toolId: "t-14", model: "DCD791", name: "Cordless drill" }))
-        .when(command(AddTool, { toolId: "t-14", model: "DCD791", name: "Cordless drill" }))
+        .when(command(AddTool, { toolId: "t-14", model: "D24000", name: "Tile saw" }))
 
-    await duplicate().then(error(/^tool t-14 already exists$/))
+    await duplicate().then(error(/^tool t-14 is already a DCD791$/))
     await duplicate().then(error((thrown) => thrown instanceof Error))
   })
 })
@@ -83,7 +83,7 @@ describe("a refusal", () => {
     await toolStoreFixture
       .given(event(CustomerRegistered, { customerId: "ada-15", name: "Ada", maxRentals: 2 }))
       .when(command(RentTool, { toolId: "t-15", customerId: "ada-15" }))
-      .then(result({ rented: false, reason: "tool-unavailable" }), noEvents())
+      .then(result({ ok: false, rejection: "TOOL_UNAVAILABLE", toolId: "t-15" }), noEvents())
   })
 })
 
@@ -155,9 +155,9 @@ describe("steps", () => {
       .and.when(command(RegisterCustomer, { customerId: "ada-21", name: "Ada", maxRentals: 1 }))
       .then(events(event(CustomerRegistered, { customerId: "ada-21", name: "Ada", maxRentals: 1 })))
       .and.when(command(RentTool, { toolId: "t-21", customerId: "ada-21" }))
-      .then(result({ rented: true }))
-      .and.when(command(RentTool, { toolId: "t-21", customerId: "ada-21" }))
-      .then(result({ rented: false, reason: "tool-unavailable" }), noEvents())
+      .then(result({ ok: true }))
+      .and.when(command(RentTool, { toolId: "t-21", customerId: "grace-21" }))
+      .then(result({ ok: false, rejection: "TOOL_UNAVAILABLE", toolId: "t-21" }), noEvents())
   })
 })
 

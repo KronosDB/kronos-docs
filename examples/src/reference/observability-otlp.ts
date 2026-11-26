@@ -27,6 +27,7 @@ import {
   type TraceCapability,
 } from "@kronos-ts/otlp"
 import { z } from "zod"
+import { pipe } from "../toolstore/pipe"
 
 const ns = withNamespace("toolstore")
 
@@ -65,8 +66,13 @@ const eventStore = inMemoryEventStore()
 const commandBus = otlpCommandBus(interceptingCommandBus(localCommandBus(unitOfWork), correlation), exporter)
 const queryBus = otlpQueryBus(interceptingQueryBus(localQueryBus(unitOfWork), correlation), exporter)
 
-// otlpHandler goes outermost: it stamps the traceparent that the others read.
-const traced = otlpHandler(loggingHandler(correlatingHandler(rentTool.handler), logger), exporter)
+// Innermost first. otlpHandler goes outermost: it stamps the traceparent that the others read.
+const traced = pipe(
+  rentTool.handler,
+  (next) => correlatingHandler(next),
+  (next) => loggingHandler(next, logger),
+  (next) => otlpHandler(next, exporter),
+)
 
 const app = kronos({
   commandHandlers: [{ ...rentTool, handler: traced, eventStore, commandBus, queryBus }],

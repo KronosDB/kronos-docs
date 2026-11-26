@@ -49,11 +49,15 @@ export const RegisterCustomer = ns.command("RegisterCustomer", {
 
 export const RentTool = ns.command("RentTool", {
   payload: z.object({ toolId: z.string(), customerId: z.string() }),
-  result: z.discriminatedUnion("rented", [
-    z.object({ rented: z.literal(true) }),
+  result: z.union([
+    z.object({ ok: z.literal(true) }),
+    z.object({ ok: z.literal(false), rejection: z.literal("TOOL_UNAVAILABLE"), toolId: z.string() }),
+    z.object({ ok: z.literal(false), rejection: z.literal("CUSTOMER_UNKNOWN"), customerId: z.string() }),
     z.object({
-      rented: z.literal(false),
-      reason: z.enum(["tool-unavailable", "customer-unknown", "over-limit"]),
+      ok: z.literal(false),
+      rejection: z.literal("OVER_LIMIT"),
+      customerId: z.string(),
+      maxRentals: z.number().int(),
     }),
   ]),
 })
@@ -118,23 +122,25 @@ export const Renting = state({
 
 export const addTool = commandHandler(AddTool, async ({ payload }, ctx) => {
   const tool = await ctx.load(Tool, { toolId: payload.toolId })
-  if (tool.exists) throw new Error(`tool ${payload.toolId} already exists`)
+  if (tool.exists) return
   ctx.append(ToolAdded, payload)
 })
 
 export const registerCustomer = commandHandler(RegisterCustomer, async ({ payload }, ctx) => {
   const customer = await ctx.load(Customer, { customerId: payload.customerId })
-  if (customer.registered) throw new Error(`customer ${payload.customerId} already registered`)
+  if (customer.registered) return
   ctx.append(CustomerRegistered, payload)
 })
 
 export const rentTool = commandHandler(RentTool, async ({ payload }, ctx) => {
   const renting = await ctx.load(Renting, payload)
-  if (!renting.customerRegistered) return { rented: false, reason: "customer-unknown" }
-  if (!renting.toolAvailable) return { rented: false, reason: "tool-unavailable" }
-  if (renting.rentals >= renting.maxRentals) return { rented: false, reason: "over-limit" }
+  if (!renting.customerRegistered) return { ok: false, rejection: "CUSTOMER_UNKNOWN", customerId: payload.customerId }
+  if (!renting.toolAvailable) return { ok: false, rejection: "TOOL_UNAVAILABLE", toolId: payload.toolId }
+  if (renting.rentals >= renting.maxRentals) {
+    return { ok: false, rejection: "OVER_LIMIT", customerId: payload.customerId, maxRentals: renting.maxRentals }
+  }
   ctx.append(ToolRented, payload)
-  return { rented: true }
+  return { ok: true }
 })
 
 export const eventStore = inMemoryEventStore()

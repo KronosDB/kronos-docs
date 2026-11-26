@@ -1,162 +1,157 @@
 ---
 title: Test a slice
-description: Test the renting rules and the inventory projection with given/when/then scenarios and a storyline from @kronos-ts/test.
+description: Run the renting slice's scenarios and the inventory's storyline with @kronos-ts/test, through the same wrappers that production uses.
 ---
 
-When you are done, the renting slice has a test for its success path and for each of its three refusals, and the inventory projection has a test that shows a rented tool as unavailable and a storyline that follows it as events are appended. You need the tool store from [Getting started](/docs/kronos-ts/getting-started), the `bun test` runner, and `@kronos-ts/test` installed:
+When you are done, the renting slice has one test per scenario: a rental, each of its three refusals, and a command sent twice. The inventory has a storyline that follows a tool from added to rented. Every test runs the slice through the same wrappers as `main.ts`, from [Organize an app into slices](/docs/kronos-ts/guides/slices), so a test exercises the same wrappers as production. You need that layout, a test runner, and `@kronos-ts/test`. The tests use Bun's runner, `bun:test`; on Node.js the same tests run with `node:test`, as described under [On Node.js](#on-nodejs).
+
+<Tabs groupId="runtime" persist items={["Bun", "Node.js"]}>
+<Tab value="Bun">
 
 ```sh
 bun add -d @kronos-ts/test
 ```
 
-## Build the slice for a test
+</Tab>
+<Tab value="Node.js">
 
-A scenario runs against an assembled app, so the test builds the slice the way a process would, with two differences. The event store is wrapped in `recordingEventStore` and the command bus in `recordingCommandBus`, which is how the fixture records what the app did. Put that in `app.ts` as a function, so each test can build its own copy:
-
-```ts
-export function rentingSlice() {
-  const eventStore = recordingEventStore(inMemoryEventStore())
-  const commandBus = recordingCommandBus(localCommandBus(unitOfWork))
-  const queryBus = localQueryBus(unitOfWork)
-  const inventoryView = eventProcessor("inventory-view", eventStore, inMemoryTokenStore(), unitOfWork)
+```sh
+npm install -D @kronos-ts/test
 ```
 
-The rest of the function is the entries from [Getting started](/docs/kronos-ts/getting-started), each carrying the recorded objects. The inventory map is created inside the function, so each app starts empty. [Testing](/docs/kronos-ts/testing) describes what the fixture requires of an app.
+</Tab>
+</Tabs>
 
-## Create a fixture per test
+## Build the app for a test
 
-The fixture never stops the app, so the test does. Keep the apps a test builds in a list and stop them after each test:
+A test composes the slices it tests exactly as `main.ts` composes every slice, over test infrastructure: the log in memory, wrapped in `recordingEventStore`, and the command bus wrapped in `recordingCommandBus`, which is how the fixture observes what the app did. `test.ts` beside `main.ts` holds the function every test file calls:
 
 ```ts
-const running: Array<{ stop(): Promise<void> }> = []
-afterEach(async () => {
-  await Promise.all(running.splice(0).map((app) => app.stop()))
+const eventStore = recordingEventStore(inMemoryEventStore())
+const commandBus = recordingCommandBus(localCommandBus(unitOfWork))
+const queryBus = localQueryBus(unitOfWork)
+```
+
+`testInfrastructure()` returns two functions. `app(...slices)` passes the handlers of the slices a test gives it to `kronos()`, with the same wrappers and infrastructure as `main.ts`, and stops the app after the file's last test. `eventProcessor` is the function a read model slice takes, applied to the test's stores:
+
+```ts
+eventProcessor: (name: string) =>
+  database
+    ? eventProcessor(name, eventStore, postgresTokenStore(pg), postgresUnitOfWork(unitOfWork, pg))
+    : eventProcessor(name, eventStore, inMemoryTokenStore(), unitOfWork),
+```
+
+A command slice needs no database. `testInfrastructure({ db: true })` creates a database for the test file, runs the migrations in it, drops it after the last test, and puts the processors' positions in it. Without it, the app is given a pool that is never opened, which a slice without tables never uses. Set `TEST_DATABASE_URL` to a server where the tests may create databases.
+
+## One fixture per file
+
+The test file sits in the slice's folder and builds one fixture, over an app with only the slice it tests:
+
+```ts
+const { app } = await testInfrastructure()
+const scenarios = fixture(app(rentTool()))
+```
+
+The scenarios in a file share the app, and nothing is reset between them. Each scenario therefore uses ids of its own, so the events one scenario appends never reach the state another loads. Small functions return the facts with a new id each time:
+
+```ts
+const drill = () => ({ toolId: crypto.randomUUID(), model: "DCD791", name: "Cordless drill" })
+const customer = (maxRentals: number) => ({ customerId: crypto.randomUUID(), name: "Ada", maxRentals })
+```
+
+## Write one test per scenario
+
+Each test is one scenario of the slice, named for what it shows. `given` lists the events already in the log, `when` sends the command, and `then` claims the result and the appended events:
+
+```ts
+it("rents an available tool to a registered customer", async () => {
+  const [tool, ada] = [drill(), customer(1)]
+  const rental = { toolId: tool.toolId, customerId: ada.customerId }
+  await scenarios
+    .given(event(ToolAdded, tool), event(CustomerRegistered, ada))
+    .when(command(RentTool, rental))
+    .then(result({ ok: true }), events(event(ToolRented, rental)))
 })
-
-function freshFixture() {
-  const app = rentingSlice()
-  running.push(app)
-  return fixture(app)
-}
 ```
 
-A new app for each test means each test starts with an empty log and empty read models.
-
-## Name the facts
-
-Most scenarios start from the same few events. Declare them once as values, and use them in `given`:
+A refusal is a command result, so its test claims it with `result(...)`, with the rejection's facts. It also claims `noEvents()`, because a refused rental records nothing:
 
 ```ts
-const drill = event(ToolAdded, { toolId: "t-1", model: "DCD791", name: "Cordless drill" })
-const tileSaw = event(ToolAdded, { toolId: "t-2", model: "D24000", name: "Tile saw" })
-const ada = event(CustomerRegistered, { customerId: "ada", name: "Ada", maxRentals: 1 })
+it("refuses a customer at their limit", async () => {
+  const [first, second, ada] = [drill(), drill(), customer(1)]
+  await scenarios
+    .given(event(ToolAdded, first), event(ToolAdded, second), event(CustomerRegistered, ada))
+    .given(event(ToolRented, { toolId: first.toolId, customerId: ada.customerId }))
+    .when(command(RentTool, { toolId: second.toolId, customerId: ada.customerId }))
+    .then(result({ ok: false, rejection: "OVER_LIMIT", customerId: ada.customerId, maxRentals: 1 }), noEvents())
+})
 ```
 
-Ada's limit is one rental, which makes the limit rule easy to reach.
+`given` can be called more than once. The calls accumulate in order, and every event is appended and handled before the command is sent. The scenarios for `TOOL_UNAVAILABLE` and `CUSTOMER_UNKNOWN` follow the same shape.
 
-## Test the success path
+Test what the slice decides, not what the wrappers in `main.ts` do. Validation, correlation and the database are the same for every slice, and are tested once for the whole application.
 
-The first scenario gives a tool and a customer, rents the tool, and claims both the result and the event that was appended:
+A command sent again after it succeeded is a scenario of its own. The rental is already in the log, so the result is `{ ok: true }` and nothing is appended:
 
 ```ts
-await freshFixture()
-  .given(drill, ada)
-  .when(command(RentTool, { toolId: "t-1", customerId: "ada" }))
-  .then(result({ rented: true }), events(event(ToolRented, { toolId: "t-1", customerId: "ada" })))
+.given(event(ToolAdded, tool), event(CustomerRegistered, ada), event(ToolRented, rental))
+.when(command(RentTool, rental))
+.then(result({ ok: true }), noEvents())
 ```
 
-## Test each refusal
+## Test the read model with a storyline
 
-A refusal is a command result, so each one is a `result(...)` claim. Each also claims `noEvents()`, because a refused rental must not record anything. Each scenario gives only the facts that lead to its refusal.
-
-A tool the store never added:
+A read model is tested through its query. The inventory's test file requests a database, because the projection writes the `inventory` table, and passes the slice its `eventProcessor`:
 
 ```ts
-await freshFixture()
-  .given(ada)
-  .when(command(RentTool, { toolId: "t-1", customerId: "ada" }))
-  .then(result({ rented: false, reason: "tool-unavailable" }), noEvents())
+const { app, eventProcessor } = await testInfrastructure({ db: true })
+const scenarios = fixture(app(inventory(eventProcessor)))
 ```
 
-A tool that is already out with another customer:
+A storyline starts from the query. Each `after` appends events and waits until the projection's processor has handled them, and each `shows` claims the query's result at that point, so the test neither sleeps nor polls:
 
 ```ts
-await freshFixture()
-  .given(drill, ada, event(CustomerRegistered, { customerId: "linus", name: "Linus", maxRentals: 1 }))
-  .given(event(ToolRented, { toolId: "t-1", customerId: "linus" }))
-  .when(command(RentTool, { toolId: "t-1", customerId: "ada" }))
-  .then(result({ rented: false, reason: "tool-unavailable" }), noEvents())
-```
-
-A customer who was never registered:
-
-```ts
-await freshFixture()
-  .given(drill)
-  .when(command(RentTool, { toolId: "t-1", customerId: "ada" }))
-  .then(result({ rented: false, reason: "customer-unknown" }), noEvents())
-```
-
-A customer at their limit who rents a second tool:
-
-```ts
-await freshFixture()
-  .given(drill, tileSaw, ada, event(ToolRented, { toolId: "t-1", customerId: "ada" }))
-  .when(command(RentTool, { toolId: "t-2", customerId: "ada" }))
-  .then(result({ rented: false, reason: "over-limit" }), noEvents())
-```
-
-The second scenario uses `given` twice. The calls accumulate in order, and every event is appended and handled before the command is sent.
-
-## Test the projection
-
-A projection is tested through its query. The scenario gives the events that built the read model, sends `GetInventory`, and claims the result. The `given` events reach the projection through its processor, and the fixture waits until the processor has handled them before it sends the query, so the test does not sleep or poll:
-
-```ts
-await freshFixture()
-  .given(drill, tileSaw, ada, event(ToolRented, { toolId: "t-1", customerId: "ada" }))
-  .when(query(GetInventory, {}))
-  .then(
-    result([
-      { toolId: "t-1", name: "Cordless drill", available: false },
-      { toolId: "t-2", name: "Tile saw", available: true },
-    ]),
-  )
-```
-
-To test the read model as it changes, use a storyline. It starts from the query, and each `after` appends events and waits for the projection to handle them before the next `shows` checks the result:
-
-```ts
-await freshFixture()
+await scenarios
   .storyline(query(GetInventory, {}))
   .shows([])
-  .after(drill)
+  .after(event(ToolAdded, { toolId: "t-1", model: "DCD791", name: "Cordless drill" }))
   .shows([{ toolId: "t-1", name: "Cordless drill", available: true }])
-  .after(ada, event(ToolRented, { toolId: "t-1", customerId: "ada" }))
+  .after(
+    event(CustomerRegistered, { customerId: "ada", name: "Ada", maxRentals: 1 }),
+    event(ToolRented, { toolId: "t-1", customerId: "ada" }),
+  )
   .shows([{ toolId: "t-1", name: "Cordless drill", available: false }])
 ```
 
-If a beat fails, the error names it and the steps before it.
+`GetInventory` returns every tool in the table, so this file holds one storyline and the ids can be the sample data. A query that returns rows for one id, such as one customer's rentals, takes the same per-scenario ids as the command tests. If a beat fails, the error names the beat and the steps before it.
+
+## On Node.js
+
+`@kronos-ts/test` does not depend on a test runner, so the tests run with `node:test` unchanged except for two imports. Import `it` from `node:test` instead of `bun:test` in each test file, and in `test.ts` import `after` from `node:test` where the Bun version imports `afterAll`. Run the tests through tsx, so that Node.js loads the TypeScript files:
+
+```sh
+node --import tsx --test 'src/**/*.test.ts'
+```
 
 ## Checking it works
 
-Run the tests:
+Run the slices' tests from the project directory:
 
 ```sh
-bun test src/guides/testing-a-slice
+TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/postgres bun test src/slices
 ```
 
 ```text title="Output"
- 7 pass
+ 6 pass
  0 fail
-Ran 7 tests across 1 file.
+Ran 6 tests across 2 files.
 ```
 
-To produce a failure message, change the `customerId` in the `ToolRented` claim of the success scenario to `linus`. The output starts with the scenario as a sentence, `given ToolAdded, CustomerRegistered, when RentTool, then a result, ToolRented`, lists the expected and appended events, and prints `customerId: expected "linus", got "ada"` under the payload differences.
+To produce a failure message, change `maxRentals: 1` in the claim of the limit scenario to `2`. The output starts with the scenario as a sentence, lists the expected and the returned result, and prints `maxRentals: expected 2, got 1` under the differences.
 
 ## Related
 
 - [Testing](/docs/kronos-ts/testing) describes fixtures, claims, storylines, time and failure messages.
-- [Refuse a command](/docs/kronos-ts/guides/refusing-a-command) explains why refusals are results.
-- [Organize an app into slices](/docs/kronos-ts/guides/slices-and-modules) builds the entries a test app can reuse.
-- [Event processors](/docs/kronos-ts/event-processors) describes how the projection receives events.
+- [Refuse a command](/docs/kronos-ts/guides/refusing-a-command) declares the refusals these tests claim.
+- [Organize an app into slices](/docs/kronos-ts/guides/slices) describes the slice layout and how `main.ts` composes it.
+- [Project into your own tables](/docs/kronos-ts/guides/projecting-into-tables) builds the projection the storyline reads.

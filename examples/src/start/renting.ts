@@ -2,24 +2,23 @@ import { commandHandler, state } from "@kronos-ts/core"
 import { z } from "zod"
 import { CustomerRegistered, RentTool, ToolAdded, ToolRented } from "./messages"
 
-type Rental = { toolId: string; customerId: string }
+type Customer = { registered: false } | { registered: true; maxRentals: number }
 
-type RentingState = {
+type Renting = {
   toolAdded: boolean
-  customerRegistered: boolean
-  maxRentals: number
-  rentals: Rental[]
+  customer: Customer
+  rentals: { toolId: string; customerId: string }[]
 }
 
 export const Renting = state({
   id: { toolId: z.string(), customerId: z.string() },
   tags: (id) => ({ toolId: id.toolId, customerId: id.customerId }),
   evolve: [
-    (): RentingState => ({ toolAdded: false, customerRegistered: false, maxRentals: 0, rentals: [] }),
+    (): Renting => ({ toolAdded: false, customer: { registered: false }, rentals: [] }),
     [ToolAdded, (renting) => ({ ...renting, toolAdded: true })],
     [
       CustomerRegistered,
-      (renting, { payload }) => ({ ...renting, customerRegistered: true, maxRentals: payload.maxRentals }),
+      (renting, { payload }) => ({ ...renting, customer: { registered: true, maxRentals: payload.maxRentals } }),
     ],
     [
       ToolRented,
@@ -32,15 +31,18 @@ export const Renting = state({
 })
 
 export const rentTool = commandHandler(RentTool, async ({ payload }, ctx) => {
-  const renting = await ctx.load(Renting, { toolId: payload.toolId, customerId: payload.customerId })
+  const { toolId, customerId } = payload
+  const renting = await ctx.load(Renting, { toolId, customerId })
 
-  const toolIsOut = renting.rentals.some((rental) => rental.toolId === payload.toolId)
-  const customerRentals = renting.rentals.filter((rental) => rental.customerId === payload.customerId)
+  const rentalsOfTool = renting.rentals.filter((rental) => rental.toolId === toolId)
+  const rentalsOfCustomer = renting.rentals.filter((rental) => rental.customerId === customerId)
 
-  if (!renting.toolAdded || toolIsOut) return { rented: false, reason: "tool-unavailable" }
-  if (!renting.customerRegistered) return { rented: false, reason: "customer-unknown" }
-  if (customerRentals.length >= renting.maxRentals) return { rented: false, reason: "over-limit" }
+  if (rentalsOfTool.some((rental) => rental.customerId === customerId)) return { ok: true }
+  if (!renting.toolAdded || rentalsOfTool.length > 0) return { ok: false, rejection: "TOOL_UNAVAILABLE", toolId }
+  if (!renting.customer.registered) return { ok: false, rejection: "CUSTOMER_UNKNOWN", customerId }
+  const { maxRentals } = renting.customer
+  if (rentalsOfCustomer.length >= maxRentals) return { ok: false, rejection: "OVER_LIMIT", customerId, maxRentals }
 
   ctx.append(ToolRented, payload)
-  return { rented: true }
+  return { ok: true }
 })

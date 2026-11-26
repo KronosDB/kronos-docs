@@ -68,8 +68,8 @@ library; these examples use zod. The `tags` record on `ToolAdded` gives the
 event one tag, `toolId`, taken from its payload.
 
 The command handler decides whether to add the tool. It loads the `Tool`
-state, which is built from the events tagged with that `toolId`, and refuses a
-duplicate:
+state, which is built from the events tagged with that `toolId`, and appends
+nothing when the tool is already added, so a command sent twice adds it once:
 
 ```ts
 export const Tool = state({
@@ -83,7 +83,7 @@ export const Tool = state({
 
 export const addTool = commandHandler(AddTool, async ({ payload }, ctx) => {
   const tool = await ctx.load(Tool, { toolId: payload.toolId })
-  if (tool.exists) throw new Error(`tool ${payload.toolId} already exists`)
+  if (tool.exists) return
   ctx.append(ToolAdded, payload)
 })
 ```
@@ -158,7 +158,7 @@ processors](/docs/kronos-ts/event-processors).
 | `@kronos-ts/otlp` | Traces, metrics and logs exported over OTLP. |
 | `@kronos-ts/test` | Given/when/then scenarios against an assembled application. |
 
-Every package is an ES module and runs on Bun and on Node.js.
+Every package is an ES module. Kronos is built and tested on [Bun](https://bun.sh) first, and these docs use Bun throughout. The packages also run on Node.js 22 or later, where the published packages are tested on Node.js 22 and 24.
 
 ## Related
 

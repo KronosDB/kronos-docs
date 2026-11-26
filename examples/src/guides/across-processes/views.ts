@@ -1,15 +1,44 @@
-import { eventProcessor, inMemoryTokenStore, kronos, unitOfWork } from "@kronos-ts/core"
-import { getInventory, recordAddedTool } from "./toolstore.js"
-import { connect } from "./kronosdb-infrastructure.js"
+import {
+  kronos,
+  validatingHandler,
+} from "@kronos-ts/core"
+import { postgresHandler } from "@kronos-ts/postgres"
+import { pipe } from "../../toolstore/pipe"
+import { inventory } from "../../toolstore/slices/toolstore/inventory"
+import { connect } from "./kronosdb-infrastructure"
 
 const infrastructure = await connect("tool-views")
-const { eventStore, commandBus, queryBus } = infrastructure
+const { commandBus, queryBus, pg } = infrastructure
 
-const inventoryView = eventProcessor("inventory-view", eventStore, inMemoryTokenStore(), unitOfWork)
+// This process runs the inventory slice.
+const handlers = [inventory(infrastructure.eventProcessor)]
 
 const app = kronos({
-  eventHandlers: [{ ...recordAddedTool, commandBus, queryBus, processor: inventoryView }],
-  queryHandlers: [{ ...getInventory, queryBus }],
+  queryHandlers: handlers
+    .map((slice) => slice.queryHandlers)
+    .flat()
+    .map((handler) => ({
+      ...handler,
+      handler: pipe(
+        handler.handler,
+        (next) => postgresHandler(next, pg),
+        (next) => validatingHandler(next, handler.descriptor),
+      ),
+      queryBus,
+    })),
+  eventHandlers: handlers
+    .map((slice) => slice.eventHandlers)
+    .flat()
+    .map((handler) => ({
+      ...handler,
+      handler: pipe(
+        handler.handler,
+        (next) => postgresHandler(next, pg),
+        (next) => validatingHandler(next, handler.descriptor),
+      ),
+      commandBus,
+      queryBus,
+    })),
 })
 await infrastructure.start()
 console.log("views process ready")

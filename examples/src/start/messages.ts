@@ -5,6 +5,7 @@ const ns = withNamespace("toolstore")
 
 export const AddTool = ns.command("AddTool", {
   payload: z.object({ toolId: z.string(), model: z.string(), name: z.string() }),
+  result: z.object({ ok: z.literal(true) }),
 })
 
 export const ToolAdded = ns.event("ToolAdded", {
@@ -14,6 +15,7 @@ export const ToolAdded = ns.event("ToolAdded", {
 
 export const RegisterCustomer = ns.command("RegisterCustomer", {
   payload: z.object({ customerId: z.string(), name: z.string(), maxRentals: z.number() }),
+  result: z.object({ ok: z.literal(true) }),
 })
 
 export const CustomerRegistered = ns.event("CustomerRegistered", {
@@ -23,11 +25,15 @@ export const CustomerRegistered = ns.event("CustomerRegistered", {
 
 export const RentTool = ns.command("RentTool", {
   payload: z.object({ toolId: z.string(), customerId: z.string() }),
-  result: z.discriminatedUnion("rented", [
-    z.object({ rented: z.literal(true) }),
+  result: z.union([
+    z.object({ ok: z.literal(true) }),
+    z.object({ ok: z.literal(false), rejection: z.literal("TOOL_UNAVAILABLE"), toolId: z.string() }),
+    z.object({ ok: z.literal(false), rejection: z.literal("CUSTOMER_UNKNOWN"), customerId: z.string() }),
     z.object({
-      rented: z.literal(false),
-      reason: z.enum(["tool-unavailable", "customer-unknown", "over-limit"]),
+      ok: z.literal(false),
+      rejection: z.literal("OVER_LIMIT"),
+      customerId: z.string(),
+      maxRentals: z.number().int(),
     }),
   ]),
 })

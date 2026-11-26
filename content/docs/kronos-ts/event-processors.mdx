@@ -120,24 +120,18 @@ Balancing is not automatic. From a processor in `app.processors`, `releaseSegmen
 
 ## Reset and replay
 
-`resetTokens(startPosition?, reset?)` rewinds a processor so that it handles events again from `startPosition`, by default 0, the start of the log. Use it to rebuild a read model after a handler changed. The processor must be stopped first on every node, and `resetTokens` throws when it is running or when another node holds a segment.
-
-The optional `reset` callback runs in the same unit of work that stores the new positions, so clearing the projection and the reset commit together. If the callback throws, nothing is cleared and the positions stay where they were.
+`resetTokens(startPosition?, reset?)` rewinds a stopped processor so that it handles events again from `startPosition`, by default `0n`, the start of the log. Use it to rebuild a read model after its handlers changed. A replay is three calls on the running processor from `app.processors`: stop it, reset it, start it.
 
 ```ts
 const processor = app.processors.get("inventory-view")!
 await processor.stop()
-await processor.resetTokens(0n, () => {
-  inventory.clear()
-})
-console.log(`replaying: ${processor.replaying}, position: ${processor.position}`)
+await processor.resetTokens(0n, () => inventory.clear())
+await processor.start()
 ```
 
-```text title="Output"
-replaying: true, position: 0
-```
+The `reset` callback runs in the unit of work that stores the new positions. Clear what the processor's handlers wrote there, and the clearing and the rewind commit together. If the callback throws, nothing is cleared and the positions stay where they were. `resetTokens` throws when the processor is running or when another node holds one of its segments, so stop it on every node first.
 
-The replay runs up to the position the processor had reached, not to the head of the log, and it survives a restart. `ctx.isReplay()` in a handler is `true` for events inside the replay and `false` for events after it, so a handler skips side effects that must not repeat:
+The replay runs up to the position the processor had reached when it was reset, not to the head of the log, and it continues after a restart. While it runs, `replaying` on the processor is `true`. In a handler, `ctx.isReplay()` is `true` for events inside the replay and `false` for events after it, so a handler can skip work that must not repeat:
 
 ```ts
 export const recordAddedTool = eventHandler(ToolAdded, ({ payload }, ctx) => {
@@ -146,7 +140,14 @@ export const recordAddedTool = eventHandler(ToolAdded, ({ payload }, ctx) => {
 })
 ```
 
-Start the processor again after the reset. The replay in [Replaying a projection](/docs/kronos-ts/guides/replaying-a-projection) does this against Postgres.
+The example adds two tools, replays, and adds a third. The inventory holds all three tools, and each tool is announced once, because the replay did not announce the first two again:
+
+```text title="Output"
+inventory:     t-1, t-2, t-3
+announcements: new tool: Cordless drill, new tool: Tile saw, new tool: Table saw
+```
+
+[Replay a projection](/docs/kronos-ts/guides/replaying-a-projection) does this for a Postgres table, from an admin endpoint.
 
 ## Checking status
 
@@ -188,3 +189,4 @@ A processor that cannot claim its segments, for example because the token store 
 - [Scheduling](/docs/kronos-ts/scheduling) covers the polling worker that `batched` and `polling` also tune.
 - [Postgres](/docs/kronos-ts/infrastructure/postgres) covers the persistent token store and dead-letter queue.
 - [Replaying a projection](/docs/kronos-ts/guides/replaying-a-projection) walks through a reset against a Postgres read model.
+- [Speed up a projection](/docs/kronos-ts/guides/optimizing-projections) measures batches, `concurrent` and segments on a Postgres projection.

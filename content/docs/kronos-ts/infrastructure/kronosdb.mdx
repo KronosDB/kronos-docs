@@ -120,8 +120,8 @@ A processor that throws on an instruction, for example splitting a segment that 
 
 <TypeTable
   type={{
-    componentName: { type: "string", description: "Name of this application, shown in the admin console. Required." },
-    serializer: { type: "Serializer", description: "Encodes payloads for the wire. Required." },
+    componentName: { required: true, type: "string", description: "Name of this application, shown in the admin console." },
+    serializer: { required: true, type: "Serializer", description: "Encodes payloads for the wire." },
     host: { type: "string", default: '"localhost"', description: "Host of the server." },
     port: { type: "number", default: "50051", description: "The server's listen port. TCP and TLS share it." },
     servers: { type: "string[]", description: 'Addresses as "host:port", for a cluster. Overrides host and port. The client tries them in order, starting from the last one that worked.' },

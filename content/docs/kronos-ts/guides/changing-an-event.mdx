@@ -3,13 +3,13 @@ title: Change an event's shape
 description: Add a field to ToolAdded with an upcast so that events already in the log stay readable, and invalidate the snapshots that the change affects.
 ---
 
-By the end of this guide `ToolAdded` carries a `category`, new events are written with it, and the events that were stored before the change still load, because they are converted to the new shape every time they are read. You need an application that already has `ToolAdded` events in its log, such as the tool store from the previous guides, and an event store that you can wrap.
+By the end of this guide `ToolAdded` carries a `category`, new events are written with it, and the events that were stored before the change still load, because they are converted to the new shape every time they are read. You need an application that already has `ToolAdded` events in its log, such as the tool store from [Organize an app into slices](/docs/kronos-ts/guides/slices), where `main.ts` builds the event store that every slice uses.
 
 The log is never rewritten. An **upcast** converts a stored event when the event store returns it, for every reader, as described on [Versioning](/docs/kronos-ts/versioning).
 
 ## Declare both versions
 
-An event descriptor has a `version` that defaults to `"1.0"`, and the version is stored with each event. Describe the shape that the log holds today as a descriptor of its own, with the same name and its current version. Then change the descriptor that the application uses, give it the new version and add the field.
+An event descriptor has a `version` that defaults to `"1.0"`, and the version is stored with each event. In the context's `events.ts`, describe the shape that the log holds today as a descriptor of its own, with the same name and its current version. Then change the descriptor that the slices use, give it the new version and add the field.
 
 ```ts
 export const ToolAddedV1 = ns.event("ToolAdded", {
@@ -27,35 +27,34 @@ export const ToolAdded = ns.event("ToolAdded", {
 })
 ```
 
-Both descriptors have the qualified name `toolstore.ToolAdded`. `ToolAddedV1` exists only so that the upcast can start from the old version and type its payload. Nothing appends or handles it. The `AddTool` command gains the same `category` field, so that `ctx.append(ToolAdded, payload)` has a value for it.
+Both descriptors have the qualified name `toolstore.ToolAdded`. `ToolAddedV1` exists only so that the upcast can start from the old version and type its payload. No slice appends or handles it. The `AddTool` command in the `add-tool` slice gains the same `category` field, so that `ctx.append(ToolAdded, payload)` has a value for it.
 
 ## Declare the upcast
 
-`upcast(from, to, map)` declares a step from one descriptor to another. `map` receives the stored payload, typed as the payload of `from`, and returns the payload of `to`. The store sets the name and the version of the event from `to`. An event that no upcast is declared from is returned as it is.
+`upcast(from, to, map)` declares a step from one descriptor to another. `map` receives the stored payload, typed as the payload of `from`, and returns the payload of `to`. The store sets the name and the version of the event from `to`, and returns an event that no upcast is declared from as it is. The upcast belongs to the context, so put it in `upcasts.ts` beside `events.ts`.
 
 ```ts
 export const categoryAdded = upcast(ToolAddedV1, ToolAdded, (payload) => ({ ...payload, category: "uncategorised" }))
 ```
 
-The value `"uncategorised"` is a business decision: the category of a tool that was added before categories existed. Every old event reads as that value from now on. An upcast changes the payload and the version, not what the event is found by: its tags were written when it was appended.
+The value `"uncategorised"` is a business decision: the category of a tool that was added before categories existed. Every old event reads as that value from now on. An upcast changes the payload, the version and the name, not what the event is found by: its tags were written when it was appended.
 
 ## Wrap the event store
 
-`upcastingEventStore(store, upcasts)` returns a store that applies the upcasts to everything it reads, for command handlers and processors alike. Wrap the store once and give the wrapped store to every command handler entry and every processor.
+`upcastingEventStore(store, upcasts)` returns a store that applies the upcasts to everything it reads, for command handlers and processors alike. Wrap the store where `main.ts` opens the infrastructure, and pass the wrapped store to `wrapping` and to the function the slices receive as `eventProcessor`, so every command handler and every processor reads through it:
 
 ```ts
-const eventStore = upcastingEventStore(inMemorySnapshottingEventStore(log), [categoryAdded])
+export const eventStore = upcastingEventStore(
+  postgresSnapshottingEventStore(postgresEventStore(pg), pg, jsonSerializer()),
+  [categoryAdded],
+)
 ```
 
-When the store is also a snapshotting store, put the upcasting wrapper outermost, as above. With Postgres that reads `upcastingEventStore(postgresSnapshottingEventStore(postgresEventStore(pg), pg, serializer), [categoryAdded])`. Then the handlers and the processor use the new shape with no other edit.
-
-```ts
-const inventoryView = eventProcessor("inventory-view", eventStore, inMemoryTokenStore(), unitOfWork)
-```
+When the store is also a snapshotting store, put the upcasting wrapper outermost, as above. The slices need no other edit: every handler and processor reads `ToolAdded` in the new shape.
 
 ## Check the snapshot keys
 
-A snapshot is a cached state, stored under a key that you choose. Upcasting converts events, not cached states, so a snapshot folded before the change is not converted. The `Tool` state was cached under `"tool-v1"` and now reads `category`, so raise its key to `"tool-v2"`. The next load folds the events again through the upcast.
+A snapshot is a cached state, stored under a key that you choose. Upcasting converts events, not cached states, so a snapshot folded before the change is not converted. The `Tool` state in the `add-tool` slice was cached under `"tool-v1"` and now reads `category`, so raise its key to `"tool-v2"`. The next load folds the events again through the upcast.
 
 ```ts
   "tool-v2",
@@ -66,11 +65,11 @@ Raise the key whenever the change touches what a state computes. A state that do
 
 ## Change the event again
 
-The next change adds a `ToolAddedV2` descriptor for the shape from this guide and a new current version. Declare a second upcast from `ToolAddedV2` to the new descriptor and list it beside the first: `upcastingEventStore(store, [categoryAdded, latestUpcast])`. An event written at 1.0 goes through both steps, whatever order they are listed in.
+The next change adds a `ToolAddedV2` descriptor for the shape from this guide and a new current version. Point `categoryAdded` at `ToolAddedV2`, declare a second upcast from `ToolAddedV2` to the current descriptor, and list both: `[categoryAdded, latestUpcast]`. An event written at 1.0 goes through both steps.
 
 ## Checking it works
 
-`app.ts` writes two `ToolAdded` events in the 1.0 shape straight into an in-memory log, wraps the log, adds a third tool through the command, and reads the inventory:
+`app.ts` writes two `ToolAdded` events in the 1.0 shape straight into an in-memory log, wraps the log with the same upcast, adds a third tool through the command, and reads an in-memory inventory:
 
 ```sh
 bun run app.ts

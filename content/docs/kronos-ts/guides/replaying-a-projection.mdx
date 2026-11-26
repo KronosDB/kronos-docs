@@ -1,106 +1,102 @@
 ---
 title: Replay a projection
-description: Rebuild a table projection from the start of the event log by stopping its processor, resetting its token and clearing the table in one transaction.
+description: Rebuild the inventory table from the start of the event log with one function in the inventory slice, and start it from an admin endpoint.
 ---
 
-By the end of this guide you can rebuild the `inventory` table from the first event in the log, without losing a row and without sending a receipt twice. You need the projection from [Project into your own tables](/docs/kronos-ts/guides/projecting-into-tables): an event handler that writes the `inventory` table through `ctx.sql()`, in a processor named `inventory-view` that runs on `postgresTokenStore` and `postgresUnitOfWork`.
+When you are done, the inventory slice has a `replayInventory` function that rebuilds its table from the first event in the log, and an admin endpoint starts it and reports its progress. You need the inventory slice from [Project into your own tables](/docs/kronos-ts/guides/projecting-into-tables): a processor named `inventory-view` whose event handlers write the `inventory` table through `ctx.sql()`.
 
-Replaying is how you fix a projection after you change what its handlers write, add a column, or find a bug in them. The log is not touched. The processor starts reading it again from a position you choose, and the handlers write the table anew.
+Replay a projection after you change what its handlers write, add a column, or fix a bug in them. The log is not changed. The processor reads it again from the start, and the handlers write the table anew.
 
-## Stop, reset, start
+## Write the replay in the slice
 
-A replay has three calls on the running processor, which is in `app.processors` under its name. `stop()` ends delivery. `resetTokens(startPosition, reset)` moves the stored position to `startPosition`, where `0n` is the start of the log. `start()` begins delivery from there, and the processor reads the log from `startPosition` onward.
+The replay belongs to the slice, because the slice declares both the processor and the table it writes. `replay.ts` in the `inventory` folder stops the processor, rewinds it to the start of the log while emptying the table, and starts it again:
 
 ```ts
-export async function replayInventory(processor: RunningProcessor, from = 0n): Promise<void> {
+export async function replayInventory(processor: RunningProcessor): Promise<void> {
   await processor.stop()
-  await processor.resetTokens(from, truncateInventory)
+  await processor.resetTokens(0n, async (uow) => {
+    const tx = await postgresTransaction(uow)
+    await tx.query(`TRUNCATE inventory`)
+  })
   await processor.start()
 }
 ```
 
-`resetTokens` throws if the processor is still running, and fails with an error naming the segment when another node holds one. Stop the processor on every node before you call it.
+`resetTokens(startPosition, reset)` moves the stored position to `startPosition`, where `0n` is the start of the log. The `reset` function runs in the transaction that stores the new position, and `postgresTransaction(uow)` returns that transaction. The truncate and the new position therefore commit together. If either fails, the old rows and the old position both stay.
 
-## Clear the table in the same transaction
+Without the truncate, the replay would write over the old rows, and a row that no handler produces any more would stay in the table. With it, the table is empty from the moment the reset commits and fills as the processor reads the log, so a query during the replay returns a partial inventory.
 
-The second argument of `resetTokens` is a function that runs in the transaction that stores the new token. Anything it writes through `postgresTransaction(uow)` commits with the token, and if it throws, the old rows and the old token both stay.
+## Stop every node first
+
+`resetTokens` throws if the processor is still running, and fails with an error naming the segment when another node holds one. [Event processors](/docs/kronos-ts/event-processors#reset-and-replay) describes segments and the reset. When the app runs on several nodes, stop the processor on all of them before the reset, and start it on all of them afterwards.
+
+## Keep side effects out of the projection
+
+A replay delivers events the handlers have already handled once. The inventory's handlers only write their table, so handling an event again is safe. Work that must not happen twice, such as sending a receipt, belongs in an automation slice with a processor of its own: replaying `inventory-view` does not touch that processor, so nothing is sent again.
+
+A handler that must handle replayed events differently reads `ctx.isReplay()`, which is `true` for events up to the position the processor had reached when it was reset, and `false` after that.
+
+## Start it from an admin endpoint
+
+The admin endpoint lists the processors that can be replayed, each with its replay function. A processor that is not in the list cannot be reset from the endpoint, because the endpoint has no function that clears its table:
 
 ```ts
-export async function truncateInventory(uow: UnitOfWork): Promise<void> {
-  const tx = await postgresTransaction(uow)
-  await tx.query(`TRUNCATE inventory`)
+const replays: Record<string, (processor: RunningProcessor) => Promise<void>> = {
+  "inventory-view": replayInventory,
 }
 ```
 
-Without this, the replay would write onto the old rows, and a row for a tool that no handler now produces would stay. With it, the table is empty from the moment the reset commits and fills as the processor reads the log, so a query during the replay returns a partial table. `resetTokens(1000n, reset)` replays from position 1000 instead, when the table is correct up to there and `reset` removes only the later rows.
-
-## Tell a replay from live delivery
-
-A replay delivers events the handlers have already handled once. `ctx.isReplay()` is `true` for events up to the position the processor had reached when you reset it, and `false` after that.
-
-A handler with a side effect that must not happen twice checks `ctx.isReplay()`. The `ToolRented` handler sends a receipt, and skips it during a replay.
+`admin(processors)` returns two functions, one per route, from a processor name to a `Response`. It takes `app.processors`, the running processors keyed by name:
 
 ```ts
-export const recordRentedTool = eventHandler(
-  ToolRented,
-  async ({ payload }, ctx: EventHandlerContext & PostgresCapability) => {
-    await ctx.sql().query(`UPDATE inventory SET available = false WHERE tool_id = $1`, [payload.toolId])
-    if (!ctx.isReplay()) sendReceipt(payload.customerId, payload.toolId)
-  },
-)
+async replay(name: string): Promise<Response> {
+  const processor = processors.get(name)
+  const replay = replays[name]
+  if (processor === undefined || replay === undefined) {
+    return Response.json({ error: `${name} cannot be replayed` }, { status: 404 })
+  }
+  try {
+    await replay(processor)
+  } catch (error) {
+    return Response.json({ error: String(error) }, { status: 409 })
+  }
+  return Response.json({ replaying: processor.replaying }, { status: 202 })
+},
 ```
 
-The table writes in the handler run in both cases, so they must tolerate rows that already exist, as described under [Idempotency](/docs/kronos-ts/guides/projecting-into-tables#idempotency).
+A failed reset returns 409 and leaves the table and the position as they were. The endpoint returns 202 once the processor has started again, not when the replay has finished. `status` returns `processor.status()`: whether the processor is running, its position as a string, whether it has caught up with the log, and whether it is replaying. A client polls it until `replaying` is `false`.
 
-## Replay from an admin endpoint
-
-An endpoint starts a replay and reports the processor's status. `adminRoutes` is a function from a `Request` to a `Response`, which `Bun.serve`, Hono and similar servers take as their fetch handler. `POST /admin/processors/inventory-view/replay` runs the three calls and `GET /admin/processors/inventory-view` returns the processor's status.
+Mount the two functions on your server's routes. With `Bun.serve`:
 
 ```ts
-const route = /^\/admin\/processors\/([^/]+)(\/replay)?$/
+routes: {
+  "/admin/processors/:name": { GET: (request) => routes.status(request.params.name) },
+  "/admin/processors/:name/replay": { POST: (request) => routes.replay(request.params.name) },
+},
 ```
 
-`processor.status()` returns whether the processor is running, its position, whether it has caught up with the log, and whether it is replaying. The position is a `bigint`, so the endpoint sends it as a string.
-
-```ts
-const { running, position, caughtUp, replaying } = processor.status()
-return Response.json({ running, position: String(position), caughtUp, replaying })
-```
-
-The replay branch rejects every processor except `inventory-view`, because the reset callback truncates only that processor's table. A failed reset returns 409 and leaves the table and the token as they were.
-
-```ts
-try {
-  await replayInventory(processor)
-} catch (error) {
-  return Response.json({ error: String(error) }, { status: 409 })
-}
-return Response.json({ replaying: processor.replaying }, { status: 202 })
-```
-
-The endpoint returns 202 once the processor is started again, not when the replay has finished. A client polls the status until `replaying` is `false`. Put the route behind your own authentication: it deletes data.
+Put the routes behind your own authentication, because a replay deletes the table's rows.
 
 ## Checking it works
 
-`app.ts` adds two tools, rents one, then calls the endpoint function directly instead of over HTTP. It waits for the replay to finish and prints the inventory again:
+`check.ts` builds the app over Postgres, adds two tools, rents one, then calls the replay route over HTTP, polls the status until the replay has finished, and prints the inventory again. To check that the table is rebuilt from the log, first insert a row that no event produced:
 
 ```sh
-DATABASE_URL=postgresql://postgres:postgres@localhost:5432/toolstore bun run app.ts
+psql "$DATABASE_URL" -c "insert into inventory values ('junk', 'junk', true)"
+bun run check.ts
 ```
 
 ```text title="Output"
-receipt sent: ada rented t-1
-before replay: t-1 rented, t-2 available
+before replay: junk available, t-1 rented, t-2 available
 POST replay 202 {"replaying":true}
-GET status {"running":true,"position":"3","caughtUp":true,"replaying":false}
+GET status {"running":true,"position":"4","caughtUp":true,"replaying":false}
 after replay: t-1 rented, t-2 available
-receipts sent: 1
 ```
 
-The receipt line appears once, before the replay: during the replay `ctx.isReplay()` was `true` for all three events. To check that the table is rebuilt from the log, insert a row of your own with `psql` before the replay runs, such as `insert into inventory values ('junk', 'junk', true)`; the reset removes that row, because it is not in the log.
+The replay removed the `junk` row, because no event in the log produces it.
 
 ## Related
 
-- [Event processors](/docs/kronos-ts/event-processors) describes tokens, replay tokens and segments.
+- [Event processors](/docs/kronos-ts/event-processors) describes positions, replays and segments.
 - [Postgres](/docs/kronos-ts/infrastructure/postgres) describes `postgresTransaction`.
 - [Project into your own tables](/docs/kronos-ts/guides/projecting-into-tables) builds the projection that this guide replays.

@@ -64,16 +64,12 @@ await wait()
 // Stop the processor, clear what its handlers wrote, and start again from the first event
 const processor = app.processors.get("inventory-view")!
 await processor.stop()
-await processor.resetTokens(0n, () => {
-  inventory.clear()
-})
-console.log(`replaying: ${processor.replaying}, position: ${processor.position}`)
-
+await processor.resetTokens(0n, () => inventory.clear())
 await processor.start()
+
 await addTool("t-3", "DWE7491", "Table saw")
 await wait()
 
-console.log(processor.status())
-console.log([...inventory.keys()])
-console.log(announcements)
+console.log(`inventory:     ${[...inventory.keys()].join(", ")}`)
+console.log(`announcements: ${announcements.join(", ")}`)
 await app.stop()

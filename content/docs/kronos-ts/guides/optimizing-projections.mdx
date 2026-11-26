@@ -1,0 +1,219 @@
+---
+title: Speed up a projection
+description: Make a projection catch up and replay faster by batching its events, writing once per batch through a per-batch repository, running its sequences side by side, and splitting it into segments.
+---
+
+When you are done, the inventory projection handles a batch of up to 1000 events with one read and one write, runs the events of different tools side by side, and can be split into segments. The measurements below show which of these steps to take for a projection of your own, and what each one costs. You need the inventory slice from [Project into your own tables](/docs/kronos-ts/guides/projecting-into-tables) and the Drizzle setup from [Use Drizzle for typed tables](/docs/kronos-ts/guides/drizzle).
+
+A projection's speed matters while it is behind the head of the log: when it is first deployed, after downtime, and during a [replay](/docs/kronos-ts/guides/replaying-a-projection). At the head, a batch holds the one or two events that arrived since the last one, and a handler that writes once per event is the simplest correct choice. Everything on this page is an optimization of the catch-up. Start without it, and add it for the projections whose replay takes too long.
+
+## What each step buys
+
+These numbers come from the replay benchmark in the kronos-ts repository ([`integrationtests/src/benchmarks/processor-replay`](https://github.com/KronosDB/kronos-ts/tree/main/integrationtests/src/benchmarks/processor-replay)). Each run replays a log of 1,000,000 events, of which the projection handles about 100,000, into a Postgres table. Bun, Postgres in Docker on the same machine, median of three runs, one process:
+
+| Projection | One segment | 4 segments | 16 segments |
+| --- | --- | --- | --- |
+| One SQL statement per event | 24.4 s | 8.8 s | 5.2 s |
+| Per-batch repository, batches of 1000, `concurrent` | 1.56 s | 0.75 s | 0.86 s |
+| Hand-written statements per batch | 1.0 s | 0.54 s | 0.91 s |
+
+Writing once per batch is the largest step: the same replay takes 1.56 s instead of 24.4 s. The repository, which keeps the handlers as short as the per-event ones, comes within 0.6 s of hand-written statements. Segments add up to another 2× on one machine. On Node.js every run took 5 to 25% longer, with the same pattern.
+
+## Keep handlers synchronous
+
+A processor awaits a handler only when the handler returns a promise. A handler that only records a change, such as one that saves a row through the repository below, can be a plain function, and the processor then runs the batch's handlers without waiting between them. Make a handler `async` only when it reads.
+
+## Batch the events
+
+`batched(processor, size)` lets the processor take up to `size` ready events in one batch, committed as one unit of work with one position write. It changes nothing at the head of the log, where only one or two events are ready. While the processor is behind, every batch holds up to `size` events. [Batches](/docs/kronos-ts/event-processors#batches) describes the defaults. A failed batch is retried one event at a time, so a failing event ends up in a batch of its own.
+
+A larger batch only saves time when the handlers write once per batch. With one statement per event, a batch of 1000 still sends 1000 statements.
+
+## Write once per batch with a repository
+
+A per-batch repository gives each handler the table as a key-value store that lives as long as the batch. `get` returns a row and `save` keeps it, and the repository reads and writes Postgres once per batch. The handlers contain no code about batches or transactions:
+
+```ts
+eventHandler(
+  ToolAdded,
+  repositoryHandler(({ payload }, ctx: Context) => {
+    ctx.inventory.save({ toolId: payload.toolId, name: payload.name, available: true })
+  }, { inventory }),
+),
+eventHandler(
+  ToolRented,
+  repositoryHandler(async ({ payload }, ctx: Context) => {
+    const tool = await ctx.inventory.get(payload.toolId)
+    if (tool) ctx.inventory.save({ ...tool, available: false })
+  }, { inventory }),
+),
+```
+
+A `ToolAdded` event carries the whole row, so its handler saves it without reading and is synchronous. `ToolRented` reads the row first. `get` returns the row as the batch has it: saved earlier in the batch, else stored in the table, else `undefined`. The rows are typed from the Drizzle schema, so `save` accepts only a complete `inventory` row:
+
+```ts
+type Context = EventHandlerContext & Repositories<{ inventory: typeof inventory }>
+```
+
+The repository is your code, kept in the slice's folder or beside `drizzle.ts`, like the `drizzleHandler` it builds on. It promises this:
+
+```ts
+export type Repository<Table extends PgTable> = {
+  /** The row as this batch has it: saved earlier in the batch, else stored, else `undefined`. */
+  get(id: string): Promise<Row<Table> | undefined>
+  /** Keeps the row for the batch. Every saved row is written in one statement before the batch commits. */
+  save(row: Row<Table>): void
+}
+```
+
+### Keep the rows on the batch
+
+All the handlers of a batch run in the batch's unit of work. `repositoryHandler` keeps each table's rows in a `WeakMap` keyed by that unit of work, so they are released with the batch, and a failed batch takes its rows with it. It sits inside `postgresHandler`, which `main.ts` applies to every event handler and which supplies the batch's transaction:
+
+```ts
+return async (message: M, context: Omit<C, keyof Tables> & PostgresCapability & { readonly unitOfWork: UnitOfWork }) => {
+  const db = drizzle(context.sql().unwrap<PoolClient>())
+  const batch = batchOf(context.unitOfWork, db, Object.values(tables))
+  const repositories = Object.fromEntries(
+    Object.entries(tables).map(([name, table]) => [name, repository(db, batch.get(table)!)]),
+  )
+  await next(message, { ...context, ...repositories } as unknown as C)
+}
+```
+
+The first handler of a batch creates the batch's tables and registers the write with `onPrepareCommit`. That action runs once, after the batch's last handler, in the batch's transaction, before the processor stores its position:
+
+```ts
+const batch = new Map(tables.map((table) => [table, kept(table)]))
+batches.set(uow, batch)
+uow.onPrepareCommit(async () => {
+  for (const table of batch.values()) await write(db, table)
+})
+```
+
+### Read once, write once
+
+`get` returns the batch's row when it has one. Otherwise it waits, and the rows asked for in the same turn of the event loop are read with one `select`:
+
+```ts
+get(id) {
+  if (table.rows.has(id)) return Promise.resolve(table.rows.get(id))
+  return new Promise((answer) => {
+    const first = table.wanted.size === 0
+    table.wanted.set(id, [...(table.wanted.get(id) ?? []), answer])
+    // Every row asked for in this turn is read in one select.
+    if (first) setImmediate(() => void read(db, table))
+  })
+},
+```
+
+The write is one upsert with every row the batch saved, updating every column but the key:
+
+```ts
+await db
+  .insert(table.table)
+  .values([...table.saved].map((id) => table.rows.get(id)!) as never)
+  .onConflictDoUpdate({
+    target: table.key,
+    set: Object.fromEntries(others.map(([name, column]) => [name, sql`excluded.${sql.identifier(column.name)}`])),
+  })
+```
+
+The rows and the position commit together, as with per-event handlers. A replay that does not clear the table writes the same rows again. The full repository is in the docs examples, in `optimizing-projections/repository.ts`. It covers a table with a one-column text primary key. Postgres takes at most 65,535 parameters in a statement, so a table with more columns or a batch larger than a few thousand rows splits its upsert into chunks.
+
+## Run sequences side by side
+
+With `get`s in one handler after another, each `get` that misses the batch is a read of its own. `concurrent(processor, sequenceOf)` runs the handlers of different sequences side by side, so the `get`s of a batch arrive in the same turn and are read with one `select`. A **sequence** is the set of events that must be handled in log order. Here it is a tool, read from the `toolId` of the event's payload:
+
+```ts
+const byTool = (event: EventMessage) => (event.payload as { toolId?: string }).toolId ?? event.identifier
+```
+
+The slice's function builds its processor with `pipe`, its wrappers listed innermost first. `eventProcessor` is the function the slice receives, with the stores already applied:
+
+```ts
+export const inventory = (eventProcessor: (name: string) => EventProcessor) => {
+  const processor = pipe(
+    eventProcessor("inventory-view"),
+    (inventoryView) => batched(inventoryView, 1000),
+    (inventoryView) => concurrent(inventoryView, byTool),
+  )
+```
+
+The events of one tool still run in log order, and the batch still commits as one unit of work. A handler must touch only the rows of its own sequence, because the handlers of other sequences run at the same time. The inventory's handlers each write the row of their event's tool. [Sequences](/docs/kronos-ts/event-processors#sequences) describes `concurrent`. An event without a `toolId` gets a sequence of its own from its identifier.
+
+## Write statements by hand
+
+When a projection's changes are simple, the handlers can record the change itself and one action writes each kind of change. This is the fastest variant in the table, at the cost of SQL written for each kind of change. Each handler adds its event's change to the batch and writes nothing:
+
+```ts
+export const projection = [
+  eventHandler(ToolAdded, ({ payload }, ctx) => {
+    changesOf(ctx.unitOfWork).added.set(payload.toolId, payload.name)
+  }),
+  eventHandler(ToolRented, ({ payload }, ctx) => {
+    changesOf(ctx.unitOfWork).rented.add(payload.toolId)
+  }),
+]
+```
+
+`changesOf` keeps the batch's changes on its unit of work and registers the write the first time, as `batchOf` does above. The write sends one statement per kind of change, with the batch's values as arrays that `unnest` and `ANY` read:
+
+```ts
+if (changes.added.size > 0) {
+  await tx.query(
+    `INSERT INTO inventory (tool_id, name, available)
+     SELECT tool_id, name, true FROM unnest($1::text[], $2::text[]) AS added(tool_id, name)
+     ON CONFLICT (tool_id) DO UPDATE SET name = EXCLUDED.name`,
+    [[...changes.added.keys()], [...changes.added.values()]],
+  )
+}
+if (changes.rented.size > 0) {
+  await tx.query(`UPDATE inventory SET available = false WHERE tool_id = ANY($1::text[])`, [[...changes.rented]])
+}
+```
+
+The statements run in a fixed order, additions first, so a tool added and rented in the same batch is inserted and then marked rented. When the order of events changes the result, the repository is the safer choice, because it applies each event to the row in turn.
+
+## Split into segments
+
+`segmented(processor, count, sequenceOf)` splits the processor into `count` segments. Each sequence belongs to one segment, chosen by a hash of its id, and each segment has its own batches, its own transaction and its own stored position. On one machine the segments run side by side, so their round trips to Postgres overlap. Across machines, each node claims some of the segments, as described under [Running on several nodes](/docs/kronos-ts/event-processors#running-on-several-nodes).
+
+```ts
+const processor = pipe(
+  eventProcessor("inventory-view"),
+  (inventoryView) => batched(inventoryView, 1000),
+  (inventoryView) => concurrent(inventoryView, byTool),
+  (inventoryView) => segmented(inventoryView, 4, byTool),
+)
+```
+
+`segmented` takes the same function as `concurrent`, and throws if it is given another, because a sequence spread over two segments would lose its order. `count` is a power of two, and it is read only the first time the processor runs. After that the stored segments decide, and `splitSegment` and `mergeSegment` on the running processor change their number.
+
+How many segments to use depends on where the time goes:
+- Handlers that write once per batch were fastest with 4 segments in the benchmark. With 16, each segment's batches were smaller, so the processor sent more statements for the same events.
+- Handlers that write once per event gained the most, 4.7× with 16 segments, because each segment adds a connection whose round trips overlap with the others.
+- Handlers that do no I/O only lose. Every event is offered to every segment the node holds, and a projection kept in memory took 11% longer with 4 segments and 56% longer with 16.
+
+Two processes on the same machine, each holding half the segments, were no faster than one: Postgres and the KronosDB server, on the same machine, were the limit. The gain from spreading segments over several machines has not been measured.
+
+## Checking it works
+
+The example's tests replay 1,500 added tools and 500 rentals into a fresh database through the repository projection, once with one segment and once with four, and through the hand-written statements. Each reads the inventory and checks that 1,500 tools are listed, 500 of them rented:
+
+```sh
+TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/postgres bun test src/guides/optimizing-projections
+```
+
+```text title="Output"
+ 3 pass
+ 0 fail
+Ran 3 tests across 2 files.
+```
+
+## Related
+
+- [Event processors](/docs/kronos-ts/event-processors) describes batches, sequences, segments and claims.
+- [Project into your own tables](/docs/kronos-ts/guides/projecting-into-tables) builds the per-event projection this page speeds up.
+- [Use Drizzle for typed tables](/docs/kronos-ts/guides/drizzle) sets up the Drizzle client the repository uses.
+- [Replay a projection](/docs/kronos-ts/guides/replaying-a-projection) rebuilds a table from the log.

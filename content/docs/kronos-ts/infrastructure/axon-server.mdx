@@ -47,7 +47,7 @@ await axon.start()
 const control = await axonServerControlPlane(axon, app.processors)
 ```
 
-`axon.start()` has to run after `kronos()`, because `kronos()` subscribes the handlers and each subscription registers the handler with the server. `start()` then waits until Axon Server has acknowledged every handler subscription, and rejects when that takes longer than `startTimeoutMs` or when the server refuses a subscription. The control plane takes `app.processors` itself and reads it at every instruction and status report, so a processor added to the app later is reported to the dashboard and can be administered from it. Passing `app.processors.values()` works too, but copies the processors once, and processors added afterwards are not seen.
+`axon.start()` has to run after `kronos()`, because `kronos()` subscribes the handlers and each subscription registers the handler with the server. `start()` resolves when the server has acknowledged every subscription. It rejects with `UnavailableError` when the acknowledgements have not arrived within `startTimeoutMs`, and with the server's error when it refuses a subscription. The control plane reads `app.processors` on every instruction and status report, so a processor added to the app later is reported and can be paused, started, split or merged from the dashboard.
 
 | Function | Provides |
 | --- | --- |
@@ -86,8 +86,8 @@ Axon Server can pause and start the event processors of a connected client, spli
 
 <TypeTable
   type={{
-    componentName: { type: "string", description: "Name of this application, shown on the dashboard. Required." },
-    serializer: { type: "Serializer", description: "Encodes payloads for the wire. Required." },
+    componentName: { required: true, type: "string", description: "Name of this application, shown on the dashboard." },
+    serializer: { required: true, type: "Serializer", description: "Encodes payloads for the wire." },
     host: { type: "string", default: '"localhost"', description: "Host of the server." },
     port: { type: "number", default: "8124", description: "The server's gRPC port." },
     servers: { type: "string[]", description: 'Addresses as "host:port", for a cluster. Overrides host and port. The first is used at start; each reconnection attempt uses the next.' },
@@ -98,7 +98,7 @@ Axon Server can pause and start the event processors of a connected client, spli
     readTimeoutMs: { type: "number", default: "15000", description: "How long a read may take before it is cancelled and retried once." },
     reconnectIntervalMs: { type: "number", default: "2000", description: "Base delay between reconnection attempts. It doubles per attempt up to 30000." },
     maxReconnectAttempts: { type: "number", default: "0", description: "Attempts before reconnecting gives up. 0 retries without limit." },
-    startTimeoutMs: { type: "number", default: "30000", description: "How long start() waits for the server to acknowledge this client's handler subscriptions." },
+    startTimeoutMs: { type: "number", default: "30000", description: "How long start() waits for the server to acknowledge the handler subscriptions." },
     resilience: { type: "Partial<ResilienceConfig>", description: "Retry policy for connecting and reconnecting. healthCheckThresholdMs (default 5000) is how long opening the connection waits for the channel to be ready before it warns and continues. log (default console.warn) receives one line per retried attempt; pass () => {} to silence it." },
     shutdownTimeoutMs: { type: "number", default: "30000", description: "How long close() waits for in-flight messaging to drain before it closes the channel anyway." },
   }}

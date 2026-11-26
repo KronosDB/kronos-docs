@@ -151,11 +151,13 @@ The handler loads once and decides:
 ```ts
 export const rentTool = commandHandler(RentTool, async ({ payload }, ctx) => {
   const renting = await ctx.load(Renting, payload)
-  if (!renting.customerRegistered) return { rented: false, reason: "customer-unknown" }
-  if (!renting.toolAvailable) return { rented: false, reason: "tool-unavailable" }
-  if (renting.rentals >= renting.maxRentals) return { rented: false, reason: "over-limit" }
+  if (!renting.customerRegistered) return { ok: false, rejection: "CUSTOMER_UNKNOWN", customerId: payload.customerId }
+  if (!renting.toolAvailable) return { ok: false, rejection: "TOOL_UNAVAILABLE", toolId: payload.toolId }
+  if (renting.rentals >= renting.maxRentals) {
+    return { ok: false, rejection: "OVER_LIMIT", customerId: payload.customerId, maxRentals: renting.maxRentals }
+  }
   ctx.append(ToolRented, payload)
-  return { rented: true }
+  return { ok: true }
 })
 ```
 
@@ -178,7 +180,7 @@ for (const outcome of sameTool) {
 ```
 
 ```text title="Output"
-fulfilled {"rented":true}
+fulfilled {"ok":true}
 rejected true Append condition violated: 1 conflicting event(s) found after position 2
 ```
 
@@ -200,9 +202,11 @@ export const rentTool = commandHandler(RentTool, async ({ payload }, ctx) => {
   })
   const rented = events.filter((event) => is(event, ToolRented)).length
   const returned = events.filter((event) => is(event, ToolReturned)).length
-  if (rented - returned >= MAX_RENTALS) return { rented: false }
+  if (rented - returned >= MAX_RENTALS) {
+    return { ok: false, rejection: "OVER_LIMIT", customerId: payload.customerId, maxRentals: MAX_RENTALS }
+  }
   ctx.append(ToolRented, payload)
-  return { rented: true }
+  return { ok: true }
 })
 ```
 

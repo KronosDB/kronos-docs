@@ -1,26 +1,35 @@
 ---
 title: Split across processes
-description: Run the tool store as a commands process and a views process that exchange commands and queries through KronosDB or RabbitMQ.
+description: Run the tool store's command slices in one process and its inventory slice in another, each process calling only its slice functions, connected through KronosDB or RabbitMQ.
 ---
 
-By the end of this guide the tool store runs as two processes. One handles commands and appends events, the other runs the inventory projection and handles `GetInventory`, and a third script, which has no handlers, sends commands to the first and queries to the second. You need either a KronosDB server with a context named `toolstore` ([Run on KronosDB](/docs/kronos-ts/guides/running-on-kronosdb) starts one), or a Postgres database and a RabbitMQ broker.
+When you are done, the tool store runs as two processes built from the same code. One runs the command slices and appends events, the other runs the inventory slice: its projection and its query handler. A third script, which runs no slices, sends commands to the first and queries to the second. You need the slice layout from [Organize an app into slices](/docs/kronos-ts/guides/slices), a Postgres database for the read model, and either a KronosDB server with a context named `toolstore` ([Run on KronosDB](/docs/kronos-ts/guides/running-on-kronosdb) starts one) or a RabbitMQ broker.
 
-The processes share one event log and are connected by their buses. The handlers and descriptors are the ones from the single-process tool store, declared in `toolstore.ts`.
+A slice is a function returning its handlers, so a process is the same composition as `main.ts`, over the slices it calls. The processes share one event log and are connected by their buses.
 
-| Process | Runs | Needs |
+| Process | Slices | Needs |
 | --- | --- | --- |
-| `commands.ts` | The `addTool` command handler. | The event store and the buses. |
-| `views.ts` | The `inventory-view` processor with its event handler, and the `getInventory` query handler. | The event store and the buses. |
-| `client.ts` | No handlers. It sends `AddTool` and `GetInventory`. | The buses. |
+| `commands.ts` | `addTool`, `registerCustomer`, `rentTool` | The event store and the buses. |
+| `views.ts` | `inventory` | The event store, the buses and the read-model database. |
+| `client.ts` | None. It sends `AddTool` and `GetInventory`. | The buses. |
 
 ## Connect to the infrastructure
 
-Each process builds its event store and its two buses in one function, `connect`, so the process files do not reference the transport. Pick the infrastructure you run.
+Each process opens its infrastructure in one function, `connect`, so the process files do not reference the transport. `connect` returns the event store and the buses, the function the slices receive as `eventProcessor`, the pool, and the functions that start and close the connections:
+
+```ts
+eventProcessor: (name: string) =>
+  eventProcessor(name, eventStore, postgresTokenStore(pg), postgresUnitOfWork(unitOfWork, pg)),
+pg,
+start: () => kdb.start(),
+```
+
+Every version keeps the read model, the processors' positions and the dead letters in Postgres, as in [Run on Postgres](/docs/kronos-ts/guides/running-on-postgres). Pick the transport you run for the rest.
 
 <Tabs items={["KronosDB", "RabbitMQ"]}>
 <Tab value="KronosDB">
 
-KronosDB carries the events, the commands and the queries, so one connection builds all three. `componentName` identifies each process to the server. Both sides must use the same bus name, `toolstore`, which is the namespace commands and queries are routed in.
+KronosDB carries the events, the commands and the queries, so one connection builds the event store and both buses. `componentName` identifies each process to the server. Both sides use the same bus name, `toolstore`, which is the namespace commands and queries are routed in.
 
 ```ts
 const kdb = await kronosDbConnection({
@@ -33,22 +42,20 @@ const kdb = await kronosDbConnection({
 ```
 
 ```ts
-eventStore: kronosDbEventStore(kdb, "toolstore"),
+const eventStore = kronosDbEventStore(kdb, "toolstore")
+```
+
+```ts
 commandBus: localFirstCommandBus(kronosDbCommandBus(localCommands, kdb, "toolstore"), localCommands),
 queryBus: localFirstQueryBus(kronosDbQueryBus(localQueries, kdb, "toolstore"), localQueries),
-start: () => kdb.start(),
-close: () => kdb.close(),
 ```
 
 </Tab>
 <Tab value="RabbitMQ">
 
-RabbitMQ transports commands and queries and stores no events, so the processes also need a shared event store. This version uses Postgres, built as in [Run on Postgres](/docs/kronos-ts/guides/running-on-postgres), and the command bus takes the Postgres unit of work. `serviceName` is shared by every replica of one deployment, and `instanceId` must be different for every running process, because the reply queues are named from it.
+RabbitMQ carries commands and queries and stores no events, so the event store is Postgres too, and the command bus takes the Postgres unit of work. `serviceName` is shared by every replica of one deployment, and `instanceId` must be different for every running process, because the reply queues are named from it.
 
 ```ts
-const pg = postgresPool(process.env.DATABASE_URL ?? "postgresql://postgres:postgres@localhost:5432/toolstore")
-await pg.start()
-
 const rabbit = await rabbitMqConnection(process.env.RABBITMQ_URL ?? "amqp://localhost", {
   serviceName,
   instanceId: crypto.randomUUID(),
@@ -56,89 +63,76 @@ const rabbit = await rabbitMqConnection(process.env.RABBITMQ_URL ?? "amqp://loca
 ```
 
 ```ts
-const localCommands = localCommandBus(postgresUnitOfWork(unitOfWork, pg))
+const eventStore = postgresEventStore(pg)
 ```
 
 ```ts
-eventStore: postgresEventStore(pg),
 commandBus: localFirstCommandBus(rabbitMqCommandBus(localCommands, rabbit), localCommands),
 queryBus: localFirstQueryBus(rabbitMqQueryBus(localQueries, rabbit), localQueries),
-start: () => rabbit.start(),
 ```
 
 </Tab>
 </Tabs>
 
-Both versions build the local buses first, and the transport buses wrap them. The query bus always takes the plain `unitOfWork`, because a query only reads:
+Both versions build the local buses first, and the transport buses wrap them. `start()` resolves once the other side has acknowledged this process's handlers, so call it after `kronos()` and before the process takes traffic. The options of each transport are on [Infrastructure](/docs/kronos-ts/infrastructure).
 
-```ts
-const localCommands = localCommandBus(unitOfWork)
-const localQueries = localQueryBus(unitOfWork)
-```
+## Run the command slices
 
-`start()` resolves once the other side has acknowledged this process's handlers. Call it after `kronos()` and before the process takes traffic. The options of each transport are on [Infrastructure](/docs/kronos-ts/infrastructure).
-
-## Handle commands
-
-The commands process registers the command handler with the buses from `connect` and the shared event store. It has no processor.
+The commands process calls its three command slices. It has no processor, because none of its slices has an event handler:
 
 ```ts
 const infrastructure = await connect("tool-commands")
+const { eventStore, commandBus, queryBus } = infrastructure
 
-const app = kronos({
-  commandHandlers: [
-    { ...addTool, eventStore: infrastructure.eventStore, commandBus: infrastructure.commandBus, queryBus: infrastructure.queryBus },
-  ],
-})
-await infrastructure.start()
+// This process runs the command slices.
+const handlers = [addTool(), registerCustomer(), rentTool()]
 ```
 
-## Run projections and handle queries
+The rest of the file is the composition from [Organize an app into slices](/docs/kronos-ts/guides/slices#compose-in-maints): `kronos()` with every handler wrapped and given the infrastructure from `connect`. A process that has no query or event handlers leaves those lists out. Then the process starts its connection with `await infrastructure.start()`.
 
-The views process holds the processor, the event handler that fills the inventory map and the query handler that reads it. The processor reads every event that the commands process appends.
+## Run the inventory slice
+
+The views process calls the inventory slice with the `eventProcessor` from `connect`, and composes its handlers in the same way. The slice builds its `inventory-view` processor, which reads every event the commands process appends:
 
 ```ts
-const inventoryView = eventProcessor("inventory-view", eventStore, inMemoryTokenStore(), unitOfWork)
-
-const app = kronos({
-  eventHandlers: [{ ...recordAddedTool, commandBus, queryBus, processor: inventoryView }],
-  queryHandlers: [{ ...getInventory, queryBus }],
-})
-await infrastructure.start()
+const handlers = [inventory(infrastructure.eventProcessor)]
 ```
 
-The inventory and the token are in memory, so after a restart the processor reads the log from the start and rebuilds the map. Replace both with tables, as in [Project into your own tables](/docs/kronos-ts/guides/projecting-into-tables), when the projection must survive a restart or when you run more than one views process.
+The processor's position is in Postgres, so after a restart the views process resumes where it stopped. A second views process on the same database shares the processor's segments with the first, as described in [Event processors](/docs/kronos-ts/event-processors).
 
-## Send from a process without handlers
+## Send from a process without slices
 
-The client builds the same infrastructure and registers nothing, so its `send` and `query` calls go to the other processes.
+The client opens the same infrastructure and calls no slices, so its `send` and `query` calls go to the other processes:
 
 ```ts
 const infrastructure = await connect("tool-client")
 await infrastructure.start()
+const { commandBus, queryBus } = infrastructure
 ```
 
 ```ts
-await send(infrastructure.commandBus, AddTool, { toolId: "t-1", model: "DCD791", name: "Cordless drill" })
-await send(infrastructure.commandBus, AddTool, { toolId: "t-2", model: "D24000", name: "Tile saw" })
+await send(commandBus, AddTool, { toolId: "t-1", model: "DCD791", name: "Cordless drill" })
+await send(commandBus, AddTool, { toolId: "t-2", model: "D24000", name: "Tile saw" })
 ```
 
-The inventory is filled after the command returns, so the script polls the query until both tools are there.
+The inventory is written after the command returns, so the script polls the query until both tools are there:
 
 ```ts
 const tools = await waitFor(
-  () => query(infrastructure.queryBus, GetInventory, {}),
+  () => query(queryBus, GetInventory, {}),
   (rows) => rows.length === 2,
 )
 ```
 
 ## Local-first buses
 
-Every process in this guide wraps its transport bus in `localFirstCommandBus` or `localFirstQueryBus`. A message whose handler is in the same process is handled in memory, without a trip to the server or the broker. Any other message goes through the transport to whichever process handles it. Without the wrapper, every command goes through the transport, including one this process handles itself. A subscription query always goes through the transport bus.
+Every process in this guide wraps its transport bus in `localFirstCommandBus` or `localFirstQueryBus`. A message whose handler is in the same process is handled in memory, without a trip to the server or the broker. Any other message goes through the transport to whichever process handles it. A subscription query always goes through the transport bus.
+
+When every instance runs every slice, as several replicas of one process do, leave the command bus without `localFirstCommandBus`. Each command is then handled by the instance that received the request, and the server or the broker never spreads commands over the replicas. Queries stay local-first, because every replica reads the same tables.
 
 ## When no instance handles a message
 
-If no process has registered a handler for a command or query name, the `send` or `query` call rejects with a `NoHandlerError`. Test for it with the `isNoHandler` guard instead of `instanceof`, so it also matches an error that arrived over the wire. The client uses it to report which process is missing.
+If no process has registered a handler for a command or query name, the `send` or `query` call rejects with a `NoHandlerError`. Test for it with the `isNoHandler` guard instead of `instanceof`, so it also matches an error that arrived over the wire. The client uses it to report which process is missing:
 
 ```ts
 } catch (error) {
@@ -150,11 +144,11 @@ If no process has registered a handler for a command or query name, the `send` o
 
 What counts as no handler depends on the transport. KronosDB fails the call immediately when no connected client has subscribed to the name. With RabbitMQ, a name that no process has ever subscribed fails with `NoHandlerError`, but a name whose queue exists and has no consumer waits until the bus timeout (30 seconds by default) and then fails with an `UnavailableError`, which `isUnavailable` recognises.
 
-The caller handles both failures. A command that no process received changed nothing, so an edge can return 503 and the client can retry once the process is back. A request that was sent and received no response may have taken effect, so a command that is resent after a timeout must detect its own earlier attempt. The [Commands](/docs/kronos-ts/commands) and [Queries](/docs/kronos-ts/queries) pages describe the failure kinds.
+A command that no process received changed nothing, so an edge can return 503 and the client can send it again once the process is back. A request that was sent and received no response may have taken effect. The tool store's commands accept being sent twice, as described in [Refuse a command](/docs/kronos-ts/guides/refusing-a-command#accept-a-command-sent-twice), so the client sends the same command again.
 
 ## Checking it works
 
-Start the commands process and the views process, each in its own terminal, and wait for each to print that it is ready.
+Start the commands process and the views process, each in its own terminal, and wait for each to print that it is ready:
 
 ```sh
 bun run commands.ts
@@ -172,13 +166,11 @@ bun run views.ts
 views process ready
 ```
 
-With RabbitMQ, import `./rabbitmq-infrastructure.js` instead of `./kronosdb-infrastructure.js` in the three process files and set `DATABASE_URL` and `RABBITMQ_URL` for each. With KronosDB on another host or port, set `KRONOSDB_HOST` and `KRONOSDB_PORT`. Then run the client, which sends the commands and prints the inventory:
+Set `DATABASE_URL` for each process, and with KronosDB on another host or port set `KRONOSDB_HOST` and `KRONOSDB_PORT`. With RabbitMQ, import `./rabbitmq-infrastructure` instead of `./kronosdb-infrastructure` in the three process files and set `RABBITMQ_URL`. Once both processes are ready, run the client, which sends both commands and prints the inventory:
 
 ```sh
 bun run client.ts
 ```
-
-It sends both commands to the commands process, queries the views process for the inventory and prints it:
 
 ```text title="Output"
 t-1  Cordless drill  available

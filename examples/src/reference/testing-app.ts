@@ -1,4 +1,5 @@
 import {
+  commandHandler,
   eventHandler,
   eventProcessor,
   inMemoryEventStore,
@@ -7,6 +8,7 @@ import {
   localCommandBus,
   localQueryBus,
   queryHandler,
+  state,
   unitOfWork,
   withNamespace,
   type EventHandlerContext,
@@ -14,10 +16,26 @@ import {
 } from "@kronos-ts/core"
 import { advanceableClock, recordingCommandBus, recordingEventStore } from "@kronos-ts/test"
 import { z } from "zod"
-import { addTool } from "../start/tool"
 import { registerCustomer } from "../start/customer"
 import { rentTool } from "../start/renting"
-import { GetInventory, ToolAdded, ToolRented } from "../start/messages"
+import { AddTool, GetInventory, ToolAdded, ToolRented } from "../start/messages"
+
+// Adding a tool again is a retry, but an id that already names another model is a bug in the caller.
+const Tool = state({
+  id: { toolId: z.string() },
+  tags: (id) => ({ toolId: id.toolId }),
+  evolve: [
+    (): { added: false } | { added: true; model: string } => ({ added: false }),
+    [ToolAdded, (_tool, { payload }) => ({ added: true, model: payload.model })],
+  ],
+})
+
+const addTool = commandHandler(AddTool, async ({ payload }, ctx) => {
+  const tool = await ctx.load(Tool, { toolId: payload.toolId })
+  if (tool.added && tool.model !== payload.model) throw new Error(`tool ${payload.toolId} is already a ${tool.model}`)
+  if (!tool.added) ctx.append(ToolAdded, payload)
+  return { ok: true }
+})
 
 export const SEVEN_DAYS = 7 * 24 * 60 * 60 * 1000
 

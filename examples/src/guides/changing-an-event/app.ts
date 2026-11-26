@@ -16,9 +16,9 @@ import {
   type TaggedEvent,
 } from "@kronos-ts/core"
 import { z } from "zod"
-import { AddTool, GetInventory, ToolAddedV1 } from "./descriptors.js"
-import { addTool, getInventory, recordAddedTool } from "./toolstore.js"
-import { categoryAdded } from "./upcast.js"
+import { ToolAddedV1 } from "./events"
+import { AddTool, GetInventory, addTool, getInventory, recordAddedTool } from "./toolstore"
+import { categoryAdded } from "./upcasts"
 import { waitFor } from "./wait-for.js"
 
 // Events as they were stored before the change, in the 1.0 shape.

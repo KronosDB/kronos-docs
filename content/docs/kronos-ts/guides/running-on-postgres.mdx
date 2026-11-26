@@ -1,28 +1,32 @@
 ---
 title: Run on Postgres
-description: Move a Kronos application from the in-memory stores to Postgres for events, processor tokens and transactions.
+description: Build the tool store's event store, processors and read models over one Postgres pool, so that they share its transactions.
 ---
 
-By the end of this guide the tool store keeps its events and its processor positions in Postgres, and each command and each batch of events commits in a Postgres transaction. You need a Postgres 14 or later database you can create tables in, and an application that already runs on the in-memory stores, such as the one in [Getting started](/docs/kronos-ts/getting-started).
+When you are done, `main.ts` builds everything the tool store stores from one Postgres pool: the event log, the processors' positions and the read models. Each command and each batch of events commits in a Postgres transaction. You need a Postgres 14 or later database you can create tables in, and the slice layout from [Organize an app into slices](/docs/kronos-ts/guides/slices), where `main.ts` composes the slice functions.
 
-The starting point is the tool store from the overview: one command (`AddTool`), one event (`ToolAdded`), one query (`GetInventory`) and a projection into a map. All of it is declared in `toolstore.ts`, and the assembly with in-memory stores is this:
-
-```ts
-const eventStore = inMemoryEventStore()
-const tokenStore = inMemoryTokenStore()
-
-const commandBus = localCommandBus(unitOfWork)
-const queryBus = localQueryBus(unitOfWork)
-const inventoryView = eventProcessor("inventory-view", eventStore, tokenStore, unitOfWork)
-```
+The slices do not change in this guide. Only `main.ts` opens Postgres, and the tests keep their event log in memory through `testInfrastructure`, as described in [Test a slice](/docs/kronos-ts/guides/testing-a-slice).
 
 ## Install the package
 
 `@kronos-ts/postgres` connects to the database through a driver you choose. A connection string loads `pg` (node-postgres), so install both:
 
+<Tabs groupId="runtime" persist items={["Bun", "Node.js"]}>
+<Tab value="Bun">
+
 ```sh
 bun add @kronos-ts/postgres pg
 ```
+
+</Tab>
+<Tab value="Node.js">
+
+```sh
+npm install @kronos-ts/postgres pg
+```
+
+</Tab>
+</Tabs>
 
 For another driver, install `postgres` (porsager) or use Bun's built-in `Bun.sql`, and pass the adapter to the pool as shown under [Connect a pool](#connect-a-pool). The [Postgres page](/docs/kronos-ts/infrastructure/postgres) lists the adapters.
 
@@ -35,11 +39,12 @@ docker run -d --name toolstore-pg -p 5432:5432 \
 
 ## Connect a pool
 
-The pool is the one Postgres resource that is opened and closed explicitly. `postgresPool` takes a connection string, and `start()` connects it and creates the schema if it is missing. Every store in the package is built from this one pool, so build it first.
+`postgresPool` takes a connection string, and `start()` connects it and creates the Kronos tables if they are missing. Every resource in this guide is built from this one pool, so `main.ts` builds it first and runs the slices' migrations after it:
 
 ```ts
 const pg = postgresPool(process.env.DATABASE_URL ?? "postgresql://postgres:postgres@localhost:5432/toolstore")
 await pg.start()
+await migrate(pg)
 ```
 
 A pool that is built from a connection string cannot be used before `start()` resolves. To set the pool size or the per-transaction timeouts, build the adapter yourself and pass it to the pool:
@@ -50,17 +55,19 @@ export const pooled = postgresPool(pgAdapter({ connectionString, poolConfig: { m
 
 ## Create the schema
 
-With the default options `pg.start()` creates five tables if they are missing.
+With the default options, `pg.start()` creates five tables if they are missing:
 
 | Table | Holds |
 | --- | --- |
 | `kronos_events` | The event log. |
-| `kronos_token_entries` | One row per processor segment: its tracking token and its claim. |
+| `kronos_token_entries` | One row per processor segment: its position and its claim. |
 | `kronos_snapshots` | Cached state folds, used by the snapshotting store. |
 | `kronos_scheduled_events` | Events scheduled for a later time. |
 | `kronos_dead_letters` | Events that a dead-lettering processor parked. |
 
-If your own migration tool owns the database, start the pool with `bootstrap: false` and apply the same statements yourself. The package exports one DDL builder per table (`buildEventsTableDDL` and the others) that returns the statement.
+The read model tables are the slices' own. `migrate(pg)` runs the statements each slice declares, such as the inventory's `createInventoryTable`, as described in [Project into your own tables](/docs/kronos-ts/guides/projecting-into-tables#create-the-table).
+
+If a migration tool owns the database, start the pool with `bootstrap: false` and give the tool the same statements. The package exports one DDL builder per table (`buildEventsTableDDL` and the others) that returns the statement:
 
 ```ts
 export const migrated = postgresPool(connectionString, { bootstrap: false })
@@ -68,92 +75,73 @@ export const migrated = postgresPool(connectionString, { bootstrap: false })
 
 Table names are an option of the pool (`tableNames`), because every store built from the pool reads and writes the same tables.
 
-## Replace the stores
+## Build the infrastructure
 
-Three lines change: the event store, the token store and the unit of work. The unit of work factory `postgresUnitOfWork(unitOfWork, pg)` gives every command and every batch of events a Postgres transaction, which the event store, the token store and your own SQL join, as described on [Postgres](/docs/kronos-ts/infrastructure/postgres).
+`postgresUnitOfWork(unitOfWork, pg)` gives every command and every batch of events a Postgres transaction, which the event store, the token store and the handlers' `ctx.sql()` join. The command bus takes it. The query bus keeps the plain `unitOfWork`, because a query only reads and `localQueryBus` rejects a transactional factory:
 
 ```ts
 const eventStore = postgresEventStore(pg)
-const tokenStore = postgresTokenStore(pg)
-const uow = postgresUnitOfWork(unitOfWork, pg)
-```
-
-The command bus and the processor take the Postgres unit of work. The query bus keeps the plain `unitOfWork`, because `localQueryBus` rejects a transactional factory.
-
-```ts
-const commandBus = localCommandBus(uow)
+const commandBus = localCommandBus(postgresUnitOfWork(unitOfWork, pg))
 const queryBus = localQueryBus(unitOfWork)
-const inventoryView = eventProcessor("inventory-view", eventStore, tokenStore, uow)
 ```
 
-Everything built from one pool shares its transactions. A token store or a client built from a different pool opens a second connection, and its writes are not atomic with the rest.
-
-The handlers, the descriptors and the `kronos()` call are unchanged. Run a command and read the inventory through the query bus, then close the app and the pool in that order:
+`main.ts` then calls the slices. The processors are built by the function the slices receive as `eventProcessor`, which applies Kronos's `eventProcessor` to the event store, a Postgres token store and the Postgres unit of work:
 
 ```ts
-await send(commandBus, AddTool, { toolId: "t-1", model: "DCD791", name: "Cordless drill" })
-await send(commandBus, AddTool, { toolId: "t-2", model: "D24000", name: "Tile saw" })
+const handlers = [
+  ...toolstore((name) => eventProcessor(name, eventStore, postgresTokenStore(pg), postgresUnitOfWork(unitOfWork, pg))),
+]
+```
 
-const tools = await waitFor(() => query(queryBus, GetInventory, {}), (rows) => rows.length === 2)
-for (const tool of tools) {
-  console.log(`${tool.toolId}  ${tool.name.padEnd(14)}  ${tool.available ? "available" : "rented"}`)
-}
+`main.ts` wraps every query and event handler with `postgresHandler(next, pg)` over the same pool, as described in [Organize an app into slices](/docs/kronos-ts/guides/slices#compose-in-maints), so a batch's table writes and its new position commit in one transaction. A token store or an SQL client built from a different pool opens a second connection, and its writes are not atomic with the rest.
 
+## Shut down in order
+
+Stop the app before closing the pool. `stop()` stops every processor, which writes its position, and waits for the handlers that are running, so close the pool once it resolves:
+
+```ts
 await app.stop()
 await pg.close()
 ```
 
-`waitFor` polls the query until the projection has caught up, because the processor delivers events after the command returns.
-
-## Keep the read model somewhere durable
-
-The inventory in this guide is still a `Map` in process memory, while the processor's position is now stored in Postgres. After a restart the processor resumes from its stored position, no events come after it, and the map stays empty. A projection that survives restarts writes to a table, and writes it in the transaction that moves the token; [Project into your own tables](/docs/kronos-ts/guides/projecting-into-tables) does that.
-
 ## Checking it works
 
-Run the script with the connection string of your database:
+Run `main.ts` with the connection string of your database:
 
 ```sh
-DATABASE_URL=postgresql://postgres:postgres@localhost:5432/toolstore bun run postgres.ts
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/toolstore bun run main.ts
 ```
 
-It prints the two tools:
-
 ```text title="Output"
-t-1  Cordless drill  available
+ada rents t-1: rented
+grace rents t-1: TOOL_UNAVAILABLE
+ada rents t-2: OVER_LIMIT
+linus rents t-2: CUSTOMER_UNKNOWN
+t-1  Cordless drill  rented
 t-2  Tile saw        available
 ```
 
-The database now holds the five tables and both events:
+The database holds the Kronos tables, the `inventory` table and the five events:
 
 ```sh
 psql "$DATABASE_URL" -c 'select sequence_position, type from kronos_events'
 ```
 
 ```text title="Output"
- sequence_position |        type
--------------------+---------------------
+ sequence_position |             type
+-------------------+------------------------------
                  1 | toolstore.ToolAdded
                  2 | toolstore.ToolAdded
-(2 rows)
+                 3 | toolstore.CustomerRegistered
+                 4 | toolstore.CustomerRegistered
+                 5 | toolstore.ToolRented
+(5 rows)
 ```
 
-It also holds the processor's position:
-
-```sh
-psql "$DATABASE_URL" -c 'select processor_name, segment from kronos_token_entries'
-```
-
-```text title="Output"
- processor_name | segment
-----------------+---------
- inventory-view |       0
-(1 row)
-```
-
-Running the script a second time rejects `AddTool` for `t-1`, because the `Tool` state folds the stored `ToolAdded` and the handler throws.
+Run `main.ts` a second time and the log still holds five events. Each command finds its change already in the log, returns `{ ok: true }` and appends nothing, and the processor resumes from its stored position.
 
 ## Related
 
 - [Postgres](/docs/kronos-ts/infrastructure/postgres) describes every store, the adapters and the table layout.
 - [Project into your own tables](/docs/kronos-ts/guides/projecting-into-tables) writes a read model in the processor's transaction.
+- [Run on KronosDB](/docs/kronos-ts/guides/running-on-kronosdb) moves the events and the buses to KronosDB and keeps the read models here.

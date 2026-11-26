@@ -23,7 +23,7 @@ export async function connectToCluster(token: string) {
     readTimeoutMs: 15_000,
     reconnectIntervalMs: 1_000,
     maxReconnectAttempts: 20,
-    startTimeoutMs: 15_000,
+    startTimeoutMs: 30_000,
     shutdownTimeoutMs: 10_000,
     platformService: {
       heartbeatIntervalMs: 2_500,

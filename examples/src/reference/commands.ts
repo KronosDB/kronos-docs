@@ -27,11 +27,15 @@ export const RegisterCustomer = ns.command("RegisterCustomer", {
 
 export const RentTool = ns.command("RentTool", {
   payload: z.object({ toolId: z.string(), customerId: z.string() }),
-  result: z.discriminatedUnion("rented", [
-    z.object({ rented: z.literal(true) }),
+  result: z.union([
+    z.object({ ok: z.literal(true) }),
+    z.object({ ok: z.literal(false), rejection: z.literal("TOOL_UNAVAILABLE"), toolId: z.string() }),
+    z.object({ ok: z.literal(false), rejection: z.literal("CUSTOMER_UNKNOWN"), customerId: z.string() }),
     z.object({
-      rented: z.literal(false),
-      reason: z.enum(["tool-unavailable", "customer-unknown", "over-limit"]),
+      ok: z.literal(false),
+      rejection: z.literal("OVER_LIMIT"),
+      customerId: z.string(),
+      maxRentals: z.number().int(),
     }),
   ]),
 })
@@ -93,7 +97,7 @@ export const Customer = state({
 // Handlers
 export const addTool = commandHandler(AddTool, async ({ payload }, ctx) => {
   const rental = await ctx.load(Rental, { toolId: payload.toolId })
-  if (rental.exists) throw new Error(`tool ${payload.toolId} already exists`)
+  if (rental.exists) return
   ctx.append(ToolAdded, payload)
 })
 
@@ -105,12 +109,14 @@ export const rentTool = commandHandler(RentTool, async ({ payload }, ctx) => {
   const rental = await ctx.load(Rental, { toolId: payload.toolId })
   const customer = await ctx.load(Customer, { customerId: payload.customerId })
 
-  if (!rental.exists || rental.heldBy !== undefined) return { rented: false, reason: "tool-unavailable" }
-  if (!customer.registered) return { rented: false, reason: "customer-unknown" }
-  if (customer.rentals >= customer.maxRentals) return { rented: false, reason: "over-limit" }
+  if (!rental.exists || rental.heldBy !== undefined) return { ok: false, rejection: "TOOL_UNAVAILABLE", toolId: payload.toolId }
+  if (!customer.registered) return { ok: false, rejection: "CUSTOMER_UNKNOWN", customerId: payload.customerId }
+  if (customer.rentals >= customer.maxRentals) {
+    return { ok: false, rejection: "OVER_LIMIT", customerId: payload.customerId, maxRentals: customer.maxRentals }
+  }
 
   ctx.append(ToolRented, payload)
-  return { rented: true }
+  return { ok: true }
 })
 
 // A handler that dispatches other commands
@@ -119,7 +125,7 @@ export const rentTools = commandHandler(RentTools, async ({ payload }, ctx) => {
   const refused: string[] = []
   for (const toolId of payload.toolIds) {
     const outcome = await ctx.send(RentTool, { toolId, customerId: payload.customerId })
-    if (outcome.rented) rented.push(toolId)
+    if (outcome.ok) rented.push(toolId)
     else refused.push(toolId)
   }
   return { rented, refused }

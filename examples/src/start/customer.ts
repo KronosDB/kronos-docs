@@ -6,13 +6,14 @@ export const Customer = state({
   id: { customerId: z.string() },
   tags: (id) => ({ customerId: id.customerId }),
   evolve: [
-    () => ({ registered: false }),
-    [CustomerRegistered, (customer) => ({ ...customer, registered: true })],
+    (): { registered: boolean } => ({ registered: false }),
+    [CustomerRegistered, () => ({ registered: true })],
   ],
 })
 
 export const registerCustomer = commandHandler(RegisterCustomer, async ({ payload }, ctx) => {
   const customer = await ctx.load(Customer, { customerId: payload.customerId })
-  if (customer.registered) throw new Error(`customer ${payload.customerId} already exists`)
+  if (customer.registered) return { ok: true }
   ctx.append(CustomerRegistered, payload)
+  return { ok: true }
 })

@@ -70,7 +70,7 @@ await toolStoreFixture
   )
   .when(command(RentTool, { toolId: "t-12", customerId: "ada-12" }))
   .then(
-    result({ rented: true }),
+    result({ ok: true }),
     events(event(ToolRented, { toolId: "t-12", customerId: "ada-12" })),
   )
 ```
@@ -91,13 +91,13 @@ await toolStoreFixture
 
 ## Results and errors
 
-A command ends in one of two ways, which a test checks separately. A command whose descriptor declares a `result` returns it, including a business refusal such as `{ rented: false, reason: "tool-unavailable" }`. A command that throws ends in an error. Claim a returned result with `result(value)` and a throw with `error(matcher)`.
+A command ends in one of two ways, which a test checks separately. A command whose descriptor declares a `result` returns it, including a business refusal such as `{ ok: false, rejection: "TOOL_UNAVAILABLE", toolId: "t-15" }`. A command that throws ends in an error. Claim a returned result with `result(value)` and a throw with `error(matcher)`.
 
 ```ts
 await toolStoreFixture
   .given(event(CustomerRegistered, { customerId: "ada-15", name: "Ada", maxRentals: 2 }))
   .when(command(RentTool, { toolId: "t-15", customerId: "ada-15" }))
-  .then(result({ rented: false, reason: "tool-unavailable" }), noEvents())
+  .then(result({ ok: false, rejection: "TOOL_UNAVAILABLE", toolId: "t-15" }), noEvents())
 ```
 
 `result` compares deeply and strictly, and a field in the actual value that the expectation does not name is a difference. It also applies to a query's result. It cannot be used when the act is an event arriving, because an event has no result, and the scenario fails with an error.
@@ -107,8 +107,8 @@ await toolStoreFixture
 ```ts
 await toolStoreFixture
   .given(event(ToolAdded, { toolId: "t-13", model: "DCD791", name: "Cordless drill" }))
-  .when(command(AddTool, { toolId: "t-13", model: "DCD791", name: "Cordless drill" }))
-  .then(error("already exists"), noEvents())
+  .when(command(AddTool, { toolId: "t-13", model: "D24000", name: "Tile saw" }))
+  .then(error("is already a DCD791"), noEvents())
 ```
 
 [Refuse a command](/docs/kronos-ts/guides/refusing-a-command) describes when a handler should return a refusal and when it should throw.
@@ -155,9 +155,9 @@ await toolStoreFixture
   .and.when(command(RegisterCustomer, { customerId: "ada-21", name: "Ada", maxRentals: 1 }))
   .then(events(event(CustomerRegistered, { customerId: "ada-21", name: "Ada", maxRentals: 1 })))
   .and.when(command(RentTool, { toolId: "t-21", customerId: "ada-21" }))
-  .then(result({ rented: true }))
-  .and.when(command(RentTool, { toolId: "t-21", customerId: "ada-21" }))
-  .then(result({ rented: false, reason: "tool-unavailable" }), noEvents())
+  .then(result({ ok: true }))
+  .and.when(command(RentTool, { toolId: "t-21", customerId: "grace-21" }))
+  .then(result({ ok: false, rejection: "TOOL_UNAVAILABLE", toolId: "t-21" }), noEvents())
 ```
 
 A step after a failed step does not run.
