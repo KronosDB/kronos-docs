@@ -14,7 +14,7 @@ KronosDB listens on two ports. Port 50051 serves everything a Kronos application
 ```sh
 docker run -d --name kronosdb -p 50051:50051 -p 9240:9240 \
   -v kronosdb-data:/data \
-  ghcr.io/kronosdb/kronosdb:0.16.0
+  ghcr.io/kronosdb/kronosdb:0.17.0
 ```
 
 The server is ready when `/ready` on the admin port returns 200:
@@ -41,7 +41,7 @@ docker run -d --name kronosdb -p 50051:50051 -p 9240:9240 \
   -v kronosdb-data:/data \
   -v "$PWD/kronosdb-manifest.toml:/etc/kronosdb/manifest.toml:ro" \
   -e KRONOSDB_MANIFEST=/etc/kronosdb/manifest.toml \
-  ghcr.io/kronosdb/kronosdb:0.16.0
+  ghcr.io/kronosdb/kronosdb:0.17.0
 ```
 
 A context can also be created from the admin console. [Contexts](/docs/kronosdb/contexts) describes what a context holds and [Configuration](/docs/kronosdb/configuration) lists the server's settings and environment variables.
