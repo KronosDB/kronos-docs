@@ -44,14 +44,20 @@ const Renting = state({
 const RentalsAnywhere = state({
   id: { toolId: z.string(), customerId: z.string() },
   tags: (id) => [{ toolId: id.toolId }, { customerId: id.customerId }],
-  evolve: [() => 0, [ToolRented, (count) => count + 1]],
+  evolve: [
+    () => 0,
+    [ToolRented, (count) => count + 1],
+  ],
 })
 
 try {
   state({
     id: { toolId: z.string() },
     tags: (id) => ({ toolId: id.toolId }),
-    evolve: [() => 0, [CustomerRegistered, (count) => count + 1]],
+    evolve: [
+      () => 0,
+      [CustomerRegistered, (count) => count + 1],
+    ],
   })
 } catch (error) {
   console.log((error as Error).message)

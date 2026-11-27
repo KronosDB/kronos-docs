@@ -44,7 +44,10 @@ export const Tool = snapshot(
   state({
     id: { toolId: z.string() },
     tags: (id) => ({ toolId: id.toolId }),
-    evolve: [() => ({ exists: false }), [ToolAdded, (tool) => ({ ...tool, exists: true })]],
+    evolve: [
+      () => ({ exists: false }),
+      [ToolAdded, (tool) => ({ ...tool, exists: true })],
+    ],
   }),
   "tool-v2",
   afterEvents(100),
