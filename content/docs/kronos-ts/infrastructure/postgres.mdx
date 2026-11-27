@@ -85,8 +85,7 @@ const inventoryView = deadLettering(
 `kronos()` does not start the scheduling worker that appends due schedules. Call `startScheduling()` once the application is up, and `stopScheduling()` before closing the pool. `polling` and `batched` set the interval and the batch size. Several nodes can run the worker against one table.
 
 ```ts
-// The scheduling worker is not started by kronos(). Tune it by wrapping the
-// store, then start it.
+// kronos() does not start the scheduling worker: tune it by wrapping the store, then start it.
 const scheduler = polling(batched(eventStore, 100), 250)
 await scheduler.startScheduling()
 

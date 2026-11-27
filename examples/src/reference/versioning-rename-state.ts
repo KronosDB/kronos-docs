@@ -29,8 +29,7 @@ export const CheckLapse = ns.command("CheckLapse", { payload: z.object({ toolId:
 
 const lapsedRentals = upcast(RentalOverdue, RentalLapsed, (payload) => payload)
 
-// The state folds the name the code uses. The store asks the log for the old
-// name too, and the upcast turns those events into RentalLapsed.
+/** Folds the name the code uses; the store also reads the old name, and the upcast turns those events into RentalLapsed. */
 export const Lapse = state({
   id: { toolId: z.string() },
   tags: (id) => ({ toolId: id.toolId }),

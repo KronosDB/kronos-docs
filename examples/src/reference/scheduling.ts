@@ -47,8 +47,7 @@ export const noteOverdue = eventHandler(RentalOverdue, ({ payload, timestamp }) 
   console.log(`overdue: ${payload.toolId} with ${payload.customerId}, scheduled at ${timestamp}`)
 })
 
-// The wrapped store is the one the handlers use and the one the deadline fires into.
-// This clock runs a week ahead, so the deadline is due as soon as it is armed.
+/** The store the handlers use and the deadline fires into, its clock a week ahead so the deadline is due at once. */
 const eventStore = inMemorySchedulingEventStore(inMemoryEventStore(), {
   clock: () => Date.now() + SEVEN_DAYS,
 })

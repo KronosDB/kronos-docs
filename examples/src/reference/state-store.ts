@@ -60,7 +60,7 @@ try {
 const current = await eventStore.source({ query })
 await eventStore.append([toolRented("t-1", "linus")], appendCondition(query, current.marker))
 
-// INFINITY is later than every event, so nothing can conflict. ORIGIN is earlier than every
-// event, so any match conflicts; here no event carries t-2 yet.
+// INFINITY is later than every event, so nothing can conflict.
 await eventStore.append([toolRented("t-1", "grace")], appendCondition(query, INFINITY))
+// ORIGIN is earlier than every event, so any match conflicts; no event carries t-2 yet.
 await eventStore.append([toolRented("t-2", "grace")], appendCondition({ tags: { toolId: "t-2" } }, ORIGIN))

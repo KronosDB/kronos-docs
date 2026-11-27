@@ -9,8 +9,7 @@ import { requestService } from "./request-service"
 import { sendReceipt } from "./send-receipt"
 import type { Receipts } from "./send-receipt/receipts"
 
-// The outside systems' clients, built once for every slice that uses them. Until real systems are chosen, these send
-// nothing; replace one here and every slice that uses it gets the real one.
+// Built once for every slice that uses them; these send nothing until real systems are chosen.
 const notifications: Notifications = { send: async () => {} }
 const receipts: Receipts = { send: async () => {} }
 

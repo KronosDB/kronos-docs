@@ -103,8 +103,7 @@ export const app = kronos({
   eventHandlers: [{ ...markRented, commandBus, queryBus, processor: inventoryView }],
 })
 
-// The scheduling worker is not started by kronos(). Tune it by wrapping the
-// store, then start it.
+// kronos() does not start the scheduling worker: tune it by wrapping the store, then start it.
 const scheduler = polling(batched(eventStore, 100), 250)
 await scheduler.startScheduling()
 
