@@ -30,13 +30,19 @@ const AddTool = ns.command("AddTool", {
 const Tool = state({
   id: { toolId: z.string() },
   tags: (id) => ({ toolId: id.toolId }),
-  evolve: [() => ({ exists: false }), [ToolAdded, (tool) => ({ ...tool, exists: true })]],
+  evolve: [
+    () => ({ exists: false }),
+    [ToolAdded, (tool) => ({ ...tool, exists: true })],
+  ],
 })
 
 const ToolName = state({
   id: { toolId: z.string() },
   tags: (id) => ({ toolId: id.toolId }),
-  evolve: [() => ({ name: "" }), [ToolAdded, (tool, { payload }) => ({ ...tool, name: payload.name })]],
+  evolve: [
+    () => ({ name: "" }),
+    [ToolAdded, (tool, { payload }) => ({ ...tool, name: payload.name })],
+  ],
 })
 
 const addTool = commandHandler(AddTool, async ({ payload }, ctx) => {

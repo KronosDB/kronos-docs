@@ -1,42 +1,22 @@
-import {
-  deadLettering,
-  eventProcessor,
-  kronos,
-  localCommandBus,
-  localQueryBus,
-  unitOfWork,
-  validatingHandler,
-} from "@kronos-ts/core"
-import { postgresDeadLetterQueue, postgresEventStore, postgresHandler, postgresPool, postgresTokenStore, postgresUnitOfWork } from "@kronos-ts/postgres"
+import { kronos, validatingHandler } from "@kronos-ts/core"
+import { postgresHandler } from "@kronos-ts/postgres"
+import { commandBus, deadLettering, eventProcessor, eventStore, pg, queryBus } from "../../toolstore/config"
 import { pipe } from "../../toolstore/pipe"
-import { migrate } from "../../toolstore/migrations"
-import { toolstore } from "./toolstore"
+import { app } from "."
 
-const pg = postgresPool(process.env.DATABASE_URL ?? "postgresql://postgres:postgres@localhost:5432/toolstore")
-await pg.start()
-await migrate(pg)
+// The final wiring: the app's handlers (slices/index.ts) wired to the infrastructure (config.ts).
+const handlers = app(eventProcessor, deadLettering)
 
-const eventStore = postgresEventStore(pg)
-const commandBus = localCommandBus(postgresUnitOfWork(unitOfWork, pg))
-const queryBus = localQueryBus(unitOfWork)
-// Each context's handlers, called once. A context is given Kronos's `eventProcessor` with this process's stores
-// applied, and Kronos's `deadLettering` with its dead-letter queue applied, and passes them to the slices that use them.
-const toolstoreHandlers = toolstore(
-  (name) => eventProcessor(name, eventStore, postgresTokenStore(pg), postgresUnitOfWork(unitOfWork, pg)),
-  (processor, sequence) => deadLettering(processor, postgresDeadLetterQueue(pg), sequence),
-)
-
-// Each kind's list is the sum of the contexts' lists, every handler piped through the wrappers the whole app shares,
-// innermost first, and given its infrastructure.
-const app = kronos({
-  commandHandlers: [...toolstoreHandlers.commandHandlers].map((handler) => ({
+// Each kind's wrappers, innermost first.
+const running = kronos({
+  commandHandlers: handlers.commandHandlers.map((handler) => ({
     ...handler,
     handler: pipe(handler.handler, (next) => validatingHandler(next, handler.descriptor)),
     eventStore,
     commandBus,
     queryBus,
   })),
-  queryHandlers: [...toolstoreHandlers.queryHandlers].map((handler) => ({
+  queryHandlers: handlers.queryHandlers.map((handler) => ({
     ...handler,
     handler: pipe(
       handler.handler,
@@ -45,7 +25,7 @@ const app = kronos({
     ),
     queryBus,
   })),
-  eventHandlers: [...toolstoreHandlers.eventHandlers].map((handler) => ({
+  eventHandlers: handlers.eventHandlers.map((handler) => ({
     ...handler,
     handler: pipe(
       handler.handler,

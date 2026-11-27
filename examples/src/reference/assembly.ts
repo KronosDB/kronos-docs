@@ -35,7 +35,10 @@ export const GetInventory = ns.query("GetInventory", {
 export const Tool = state({
   id: { toolId: z.string() },
   tags: (id) => ({ toolId: id.toolId }),
-  evolve: [() => ({ exists: false }), [ToolAdded, (tool) => ({ ...tool, exists: true })]],
+  evolve: [
+    () => ({ exists: false }),
+    [ToolAdded, (tool) => ({ ...tool, exists: true })],
+  ],
 })
 
 export const addTool = commandHandler(AddTool, async ({ payload }, ctx) => {

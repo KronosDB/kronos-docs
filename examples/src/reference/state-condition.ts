@@ -1,8 +1,7 @@
 import { commandHandler } from "@kronos-ts/core"
 import { Renting, RentTool, ToolRented } from "./state.js"
 
-// The conflict window is narrowed to rentals of this tool. A registration or a return
-// that land after the load no longer make the append fail.
+/** Narrows the conflict window to this tool's rentals: a registration or a return after the load no longer fails the append. */
 export const rentToolNarrowWindow = commandHandler(RentTool, {
   handler: async ({ payload }, ctx) => {
     const renting = await ctx.load(Renting, payload)

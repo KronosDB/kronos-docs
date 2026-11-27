@@ -95,7 +95,7 @@ it("refuses a customer at their limit", async () => {
 
 `given` can be called more than once. The calls accumulate in order, and every event is appended and handled before the command is sent. The scenarios for `TOOL_UNAVAILABLE` and `CUSTOMER_UNKNOWN` follow the same shape.
 
-Test what the slice decides, not what the wrappers in `main.ts` do. Validation, correlation and the database are the same for every slice, and are tested once for the whole application.
+Test what the slice decides, not what the wrappers in `main.ts` do. Validation, correlation and the database are the same for every slice and come from Kronos, so a slice's tests check only its business logic.
 
 A command sent again after it succeeded is a scenario of its own. The rental is already in the log, so the result is `{ ok: true }` and nothing is appended:
 

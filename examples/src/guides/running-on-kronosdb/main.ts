@@ -1,62 +1,27 @@
-import {
-  eventProcessor,
-  jsonSerializer,
-  kronos,
-  localCommandBus,
-  localFirstQueryBus,
-  localQueryBus,
-  query,
-  send,
-  unitOfWork,
-  validatingHandler,
-} from "@kronos-ts/core"
-import { kronosDbCommandBus, kronosDbConnection, kronosDbEventStore, kronosDbQueryBus } from "@kronos-ts/kronosdb"
-import { postgresHandler, postgresPool, postgresTokenStore, postgresUnitOfWork } from "@kronos-ts/postgres"
+import { kronos, query, send, validatingHandler } from "@kronos-ts/core"
+import { postgresHandler } from "@kronos-ts/postgres"
 import { caughtUp } from "../../toolstore/caught-up"
 import { pipe } from "../../toolstore/pipe"
-import { migrate } from "../../toolstore/migrations"
-import { toolstore } from "../../toolstore/slices/toolstore"
+import { app } from "../../toolstore/slices"
 import { AddTool } from "../../toolstore/slices/toolstore/add-tool/command"
 import { GetInventory } from "../../toolstore/slices/toolstore/inventory/query"
 import { RegisterCustomer } from "../../toolstore/slices/toolstore/register-customer/command"
 import { RentTool } from "../../toolstore/slices/toolstore/rent-tool/command"
+import { close, commandBus, eventProcessor, eventStore, kdb, pg, queryBus } from "./config"
 
-// Postgres: the read models, the processors' positions and the dead letters.
-const pg = postgresPool(process.env.DATABASE_URL ?? "postgresql://postgres:postgres@localhost:5432/toolstore")
-await pg.start()
-await migrate(pg)
+// The final wiring: the app's handlers (slices/index.ts) wired to the infrastructure (config.ts).
+const handlers = app(eventProcessor)
 
-// KronosDB: the event log and both buses, over one connection.
-const kdb = await kronosDbConnection({
-  host: process.env.KRONOSDB_HOST ?? "localhost",
-  port: Number(process.env.KRONOSDB_PORT ?? 50051),
-  context: "toolstore",
-  componentName: "toolstore",
-  serializer: jsonSerializer(),
-})
-
-const eventStore = kronosDbEventStore(kdb, "toolstore")
-const commandBus = kronosDbCommandBus(localCommandBus(unitOfWork), kdb, "toolstore")
-const localQueries = localQueryBus(unitOfWork)
-const queryBus = localFirstQueryBus(kronosDbQueryBus(localQueries, kdb, "toolstore"), localQueries)
-
-// Each context's handlers, called once. A context is given Kronos's `eventProcessor` with this process's stores
-// applied, and passes it to the slices that build a processor.
-const toolstoreHandlers = toolstore((name) =>
-  eventProcessor(name, eventStore, postgresTokenStore(pg), postgresUnitOfWork(unitOfWork, pg)),
-)
-
-// Each kind's list is the sum of the contexts' lists, every handler piped through the wrappers the whole app shares,
-// innermost first, and given its infrastructure.
-const app = kronos({
-  commandHandlers: [...toolstoreHandlers.commandHandlers].map((handler) => ({
+// Each kind's wrappers, innermost first.
+const running = kronos({
+  commandHandlers: handlers.commandHandlers.map((handler) => ({
     ...handler,
     handler: pipe(handler.handler, (next) => validatingHandler(next, handler.descriptor)),
     eventStore,
     commandBus,
     queryBus,
   })),
-  queryHandlers: [...toolstoreHandlers.queryHandlers].map((handler) => ({
+  queryHandlers: handlers.queryHandlers.map((handler) => ({
     ...handler,
     handler: pipe(
       handler.handler,
@@ -65,7 +30,7 @@ const app = kronos({
     ),
     queryBus,
   })),
-  eventHandlers: [...toolstoreHandlers.eventHandlers].map((handler) => ({
+  eventHandlers: handlers.eventHandlers.map((handler) => ({
     ...handler,
     handler: pipe(
       handler.handler,
@@ -88,11 +53,10 @@ for (const [toolId, customerId] of [["t-1", "ada"], ["t-1", "grace"], ["t-2", "a
   console.log(`${customerId} rents ${toolId}: ${outcome.ok ? "rented" : outcome.rejection}`)
 }
 
-await caughtUp(app.processors.get("inventory-view")!, eventStore)
+await caughtUp(running.processors.get("inventory-view")!, eventStore)
 for (const tool of await query(queryBus, GetInventory, {})) {
   console.log(`${tool.toolId}  ${tool.name.padEnd(14)}  ${tool.available ? "available" : "rented"}`)
 }
 
-await app.stop()
-await kdb.close()
-await pg.close()
+await running.stop()
+await close()

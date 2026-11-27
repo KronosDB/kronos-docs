@@ -1,49 +1,29 @@
 /// <reference types="../../../../../kronos-ts/node_modules/bun-types" />
-import {
-  eventProcessor,
-  kronos,
-  localCommandBus,
-  localQueryBus,
-  query,
-  send,
-  unitOfWork,
-  validatingHandler,
-} from "@kronos-ts/core"
-import { postgresEventStore, postgresHandler, postgresPool, postgresTokenStore, postgresUnitOfWork } from "@kronos-ts/postgres"
+import { kronos, query, send, validatingHandler } from "@kronos-ts/core"
+import { postgresHandler } from "@kronos-ts/postgres"
 import { caughtUp } from "../../toolstore/caught-up"
+import { close, commandBus, eventProcessor, eventStore, pg, queryBus } from "../../toolstore/config"
 import { pipe } from "../../toolstore/pipe"
-import { migrate } from "../../toolstore/migrations"
-import { toolstore } from "../../toolstore/slices/toolstore"
+import { app } from "../../toolstore/slices"
 import { AddTool } from "../../toolstore/slices/toolstore/add-tool/command"
 import { GetInventory } from "../../toolstore/slices/toolstore/inventory/query"
 import { RegisterCustomer } from "../../toolstore/slices/toolstore/register-customer/command"
 import { RentTool } from "../../toolstore/slices/toolstore/rent-tool/command"
 import { serveAdmin } from "./server"
 
-const pg = postgresPool(process.env.DATABASE_URL ?? "postgresql://postgres:postgres@localhost:5432/toolstore")
-await pg.start()
-await migrate(pg)
+// The final wiring: the app's handlers (slices/index.ts) wired to the infrastructure (config.ts).
+const handlers = app(eventProcessor)
 
-const eventStore = postgresEventStore(pg)
-const commandBus = localCommandBus(postgresUnitOfWork(unitOfWork, pg))
-const queryBus = localQueryBus(unitOfWork)
-// Each context's handlers, called once. A context is given Kronos's `eventProcessor` with this process's stores
-// applied, and passes it to the slices that build a processor.
-const toolstoreHandlers = toolstore((name) =>
-  eventProcessor(name, eventStore, postgresTokenStore(pg), postgresUnitOfWork(unitOfWork, pg)),
-)
-
-// Each kind's list is the sum of the contexts' lists, every handler piped through the wrappers the whole app shares,
-// innermost first, and given its infrastructure.
-const app = kronos({
-  commandHandlers: [...toolstoreHandlers.commandHandlers].map((handler) => ({
+// Each kind's wrappers, innermost first.
+const running = kronos({
+  commandHandlers: handlers.commandHandlers.map((handler) => ({
     ...handler,
     handler: pipe(handler.handler, (next) => validatingHandler(next, handler.descriptor)),
     eventStore,
     commandBus,
     queryBus,
   })),
-  queryHandlers: [...toolstoreHandlers.queryHandlers].map((handler) => ({
+  queryHandlers: handlers.queryHandlers.map((handler) => ({
     ...handler,
     handler: pipe(
       handler.handler,
@@ -52,7 +32,7 @@ const app = kronos({
     ),
     queryBus,
   })),
-  eventHandlers: [...toolstoreHandlers.eventHandlers].map((handler) => ({
+  eventHandlers: handlers.eventHandlers.map((handler) => ({
     ...handler,
     handler: pipe(
       handler.handler,
@@ -69,14 +49,14 @@ await send(commandBus, AddTool, { toolId: "t-2", model: "D24000", name: "Tile sa
 await send(commandBus, RegisterCustomer, { customerId: "ada", name: "Ada", maxRentals: 1 })
 await send(commandBus, RentTool, { toolId: "t-1", customerId: "ada" })
 
-const inventoryView = app.processors.get("inventory-view")!
+const inventoryView = running.processors.get("inventory-view")!
 const summary = async () =>
   (await query(queryBus, GetInventory, {})).map((row) => `${row.toolId} ${row.available ? "available" : "rented"}`).join(", ")
 
 await caughtUp(inventoryView, eventStore)
 console.log("before replay:", await summary())
 
-const server = serveAdmin(app.processors)
+const server = serveAdmin(running.processors)
 const started = await fetch(new URL("/admin/processors/inventory-view/replay", server.url), { method: "POST" })
 console.log("POST replay", started.status, JSON.stringify(await started.json()))
 
@@ -86,5 +66,5 @@ console.log("GET status", JSON.stringify(await status.json()))
 console.log("after replay:", await summary())
 
 await server.stop()
-await app.stop()
-await pg.close()
+await running.stop()
+await close()

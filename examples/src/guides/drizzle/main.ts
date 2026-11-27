@@ -1,16 +1,5 @@
-import {
-  eventProcessor,
-  kronos,
-  localCommandBus,
-  localQueryBus,
-  query,
-  send,
-  unitOfWork,
-  validatingHandler,
-} from "@kronos-ts/core"
-import { postgresEventStore, postgresHandler, postgresPool, postgresTokenStore, postgresUnitOfWork } from "@kronos-ts/postgres"
-import { drizzle } from "drizzle-orm/node-postgres"
-import { migrate } from "drizzle-orm/node-postgres/migrator"
+import { kronos, query, send, validatingHandler } from "@kronos-ts/core"
+import { postgresHandler } from "@kronos-ts/postgres"
 import { caughtUp } from "../../toolstore/caught-up"
 import { pipe } from "../../toolstore/pipe"
 import { addTool } from "../../toolstore/slices/toolstore/add-tool"
@@ -20,28 +9,14 @@ import { registerCustomer } from "../../toolstore/slices/toolstore/register-cust
 import { RegisterCustomer } from "../../toolstore/slices/toolstore/register-customer/command"
 import { rentTool } from "../../toolstore/slices/toolstore/rent-tool"
 import { RentTool } from "../../toolstore/slices/toolstore/rent-tool/command"
+import { close, commandBus, eventProcessor, eventStore, pg, queryBus } from "./config"
 import { inventory } from "./inventory"
 
-const databaseUrl = process.env.DATABASE_URL ?? "postgresql://postgres:postgres@localhost:5432/toolstore"
+// A slice that builds a processor is called once.
+const inventoryView = inventory(eventProcessor)
 
-// The migrations drizzle-kit generated from the slices' schemas, applied before the app starts.
-const migrator = drizzle(databaseUrl)
-await migrate(migrator, { migrationsFolder: new URL("./migrations", import.meta.url).pathname })
-await migrator.$client.end()
-
-const pg = postgresPool(databaseUrl)
-await pg.start()
-
-const eventStore = postgresEventStore(pg)
-const commandBus = localCommandBus(postgresUnitOfWork(unitOfWork, pg))
-const queryBus = localQueryBus(unitOfWork)
-// A slice that builds a processor is called once, its processor built over this process's stores.
-const inventoryView = inventory((name) =>
-  eventProcessor(name, eventStore, postgresTokenStore(pg), postgresUnitOfWork(unitOfWork, pg)),
-)
-
-// Every handler piped through the wrappers the whole app shares, innermost first, and given its infrastructure.
-const app = kronos({
+// Each kind's wrappers, innermost first.
+const running = kronos({
   commandHandlers: [
     ...addTool().commandHandlers,
     ...registerCustomer().commandHandlers,
@@ -79,10 +54,10 @@ await send(commandBus, AddTool, { toolId: "t-2", model: "D24000", name: "Tile sa
 await send(commandBus, RegisterCustomer, { customerId: "ada", name: "Ada", maxRentals: 1 })
 await send(commandBus, RentTool, { toolId: "t-1", customerId: "ada" })
 
-await caughtUp(app.processors.get("inventory-view")!, eventStore)
+await caughtUp(running.processors.get("inventory-view")!, eventStore)
 for (const tool of await query(queryBus, GetInventory, {})) {
   console.log(`${tool.toolId}  ${tool.name.padEnd(14)}  ${tool.available ? "available" : "rented"}`)
 }
 
-await app.stop()
-await pg.close()
+await running.stop()
+await close()

@@ -77,7 +77,9 @@ export const RentalLog = state({
 export const CustomerActivity = state({
   id: { customerId: z.string() },
   tags: (id) => ({ customerId: id.customerId }),
-  evolve: [() => ({ seen: false })],
+  evolve: [
+    () => ({ seen: false }),
+  ],
 })
 
 console.log(JSON.stringify(CustomerActivity.query({ customerId: "ada" })))

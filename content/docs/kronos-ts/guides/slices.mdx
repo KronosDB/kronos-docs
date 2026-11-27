@@ -1,9 +1,9 @@
 ---
 title: Organize an app into slices
-description: Split the tool store into one folder per feature, have every slice return its handler lists, and wrap every handler and give it its infrastructure in main.ts.
+description: Split the tool store into one folder per feature, have every slice return its handler lists, build the infrastructure in config.ts, and wire every handler to it in main.ts.
 ---
 
-When you are done, every feature of the tool store is a folder whose `index.ts` returns its handler lists, the context returns the sum of its slices' lists, and `main.ts` opens the infrastructure, pipes every handler through the wrappers the whole app shares and gives it its infrastructure. This is the layout we recommend, and the one the other guides use. You need the tool store from [Getting started](/docs/kronos-ts/getting-started) and a Postgres database, as set up in [Run on Postgres](/docs/kronos-ts/guides/running-on-postgres).
+When you are done, every feature of the tool store is a folder whose `index.ts` returns its handler lists, the context returns the sum of its slices' lists, `config.ts` builds the infrastructure, and `main.ts` pipes every handler through the wrappers the whole app shares and gives it that infrastructure. This is the layout we recommend, and the one the other guides use. You need the tool store from [Getting started](/docs/kronos-ts/getting-started) and a Postgres database, as set up in [Run on Postgres](/docs/kronos-ts/guides/running-on-postgres).
 
 A **slice** is one feature: one command, one read model or one automation, with the descriptors, states and handlers that implement it. A slice returns its handlers in the three lists `kronos()` takes, a context returns the sum of its slices' lists, and `main.ts` sums the contexts' lists. The infrastructure exists only in `main.ts`. `kronos()` has no slice type of its own.
 
@@ -14,10 +14,12 @@ Every slice is a folder with the same files, and every folder belongs to a conte
 <FileTree>
   <TreeFolder name="src">
     <TreeFile name="pipe.ts" note="`pipe`, which applies wrappers innermost first" />
-    <TreeFile name="main.ts" note="opens the infrastructure, wraps every handler, starts the app" />
+    <TreeFile name="config.ts" note="builds and configures the infrastructure" />
+    <TreeFile name="main.ts" note="wires every handler to the infrastructure and starts the app" />
     <TreeFile name="migrations.ts" note="the tables the slices write" />
     <TreeFile name="test.ts" note="`testInfrastructure`: the same composition over in-memory stores" />
     <TreeFolder name="slices">
+      <TreeFile name="index.ts" note="the app's handlers: the sum of the contexts' lists" />
       <TreeFolder name="toolstore">
         <TreeFile name="events.ts" note="the namespace and every event of the context" />
         <TreeFile name="index.ts" note="the sum of the slices' lists" />
@@ -141,7 +143,7 @@ export const inventory = (eventProcessor: (name: string) => EventProcessor) => {
 }
 ```
 
-`eventProcessor` here is Kronos's `eventProcessor` with the event store, the token store and the unit of work already applied in `main.ts`, so it takes only a name. The slice decides what is its own, the processor's name and batch size, and never receives the stores, which differ between production and tests. The name is where the processor's position is stored: give it a new name when the table it writes changes, and it reads the log again from the start.
+`eventProcessor` here is Kronos's `eventProcessor` with the event store, the token store and the unit of work already applied in `config.ts`, so it takes only a name. The slice decides what is its own, the processor's name and batch size, and never receives the stores, which differ between production and tests. The name is where the processor's position is stored: give it a new name when the table it writes changes, and it reads the log again from the start.
 
 The handlers write the table through `ctx.sql()`, which `main.ts` supplies to every query and event handler. [Project into your own tables](/docs/kronos-ts/guides/projecting-into-tables) covers the table and the handlers.
 
@@ -160,30 +162,58 @@ export const toolstore = (eventProcessor: (name: string) => EventProcessor) => {
 }
 ```
 
-A new slice adds one spread to each list it has handlers for. Every level exposes the same three lists, and each level above is their sum, so the handlers are never gathered into a list of slices only to be taken apart again.
+A new slice adds one spread to each list it has handlers for.
+
+## Sum the contexts in slices/index.ts
+
+`slices/index.ts` exports `app`, which returns the app's handlers in the same three lists. It sums the contexts the way a context sums its slices: each context is called once, and each list spreads the contexts' lists of that kind. A context that is not spread here does not run:
+
+```ts
+export const app = (eventProcessor: (name: string) => EventProcessor) => {
+  const toolstoreHandlers = toolstore(eventProcessor)
+  return {
+    commandHandlers: [...toolstoreHandlers.commandHandlers],
+    queryHandlers: [...toolstoreHandlers.queryHandlers],
+    eventHandlers: [...toolstoreHandlers.eventHandlers],
+  }
+}
+```
+
+A second context adds one constant and one spread to each list here, and nothing anywhere else. Every level exposes the same three lists, and each level above is their sum, so the handlers are never gathered into a list of slices only to be taken apart again.
+
+## Build the infrastructure in config.ts
+
+`config.ts` builds and configures every piece of infrastructure and exports it: the Postgres pool, started and migrated, the event store, the buses, and a `close` that closes what it opened. It is the one place that opens the infrastructure and reads settings, such as `DATABASE_URL`, from the environment. Kronos's packages take plain options and read no environment variables.
+
+The function the slices receive as `eventProcessor` is written here too, by applying Kronos's `eventProcessor` to the stores:
+
+```ts
+export const eventProcessor = (name: string) =>
+  coreEventProcessor(name, eventStore, postgresTokenStore(pg), postgresUnitOfWork(unitOfWork, pg))
+```
+
+[Run on Postgres](/docs/kronos-ts/guides/running-on-postgres) builds this file piece by piece. Running on other infrastructure, as in [Run on KronosDB](/docs/kronos-ts/guides/running-on-kronosdb), changes only `config.ts`.
 
 ## Compose in main.ts
 
-`main.ts` opens the infrastructure and calls each context once. The function the slices receive as `eventProcessor` is written here, anonymously, by applying Kronos's `eventProcessor` to the stores, and passed down through the context:
+`main.ts` is the final wiring. It imports the infrastructure from `config.ts` and calls `app` once with the functions the slices need. It names no context and no slice, and builds no infrastructure:
 
 ```ts
-const toolstoreHandlers = toolstore((name) =>
-  eventProcessor(name, eventStore, postgresTokenStore(pg), postgresUnitOfWork(unitOfWork, pg)),
-)
+const handlers = app(eventProcessor)
 ```
 
-Then it passes every handler to `kronos()`. Each list is the sum of the contexts' lists of that kind, and each handler in it is piped through the wrappers the whole app shares, innermost first, and given its event store and buses:
+Then it passes every handler to `kronos()`. Each handler of each kind is piped through the wrappers the whole app shares, innermost first, and given its event store and buses:
 
 ```ts
-const app = kronos({
-  commandHandlers: [...toolstoreHandlers.commandHandlers].map((handler) => ({
+const running = kronos({
+  commandHandlers: handlers.commandHandlers.map((handler) => ({
     ...handler,
     handler: pipe(handler.handler, (next) => validatingHandler(next, handler.descriptor)),
     eventStore,
     commandBus,
     queryBus,
   })),
-  queryHandlers: [...toolstoreHandlers.queryHandlers].map((handler) => ({
+  queryHandlers: handlers.queryHandlers.map((handler) => ({
     ...handler,
     handler: pipe(
       handler.handler,
@@ -194,11 +224,9 @@ const app = kronos({
   })),
 ```
 
-A second context is called once into a constant of its own, beside the first, and adds one spread to each list in `kronos()`.
+The event handler list is built the same way and keeps the processor each slice gave its handlers. `postgresHandler` gives query and event handlers `ctx.sql()`, and `validatingHandler` checks the payload, the result and every appended event against their descriptors. This is the only code that combines handlers with infrastructure, so every handler gets the same wrappers. `main.ts` lists only the kinds of handler some slice has: an empty list gives TypeScript no handler to infer the type from, so the first slice of a kind adds that kind's list, written in the same way. That is the only change a new slice or context makes to `main.ts`. A wrapper only one slice needs stays in that slice, inside these. [Interception and validation](/docs/kronos-ts/interception-and-validation) and [Observability](/docs/kronos-ts/observability) describe the wrappers Kronos ships.
 
-The event handler list is built the same way and keeps the processor each slice gave its handlers. `postgresHandler` gives query and event handlers `ctx.sql()`, and `validatingHandler` checks the payload, the result and every appended event against their descriptors. This is the only code that combines handlers with infrastructure, so every handler gets the same wrappers. `main.ts` lists only the kinds of handler some slice has: an empty list gives TypeScript no handler to infer the type from, so the first slice of a kind adds that kind's list, written in the same way. A wrapper only one slice needs stays in that slice, inside these. [Interception and validation](/docs/kronos-ts/interception-and-validation) and [Observability](/docs/kronos-ts/observability) describe the wrappers Kronos ships.
-
-`main.ts` is also the one place that reads settings, such as `DATABASE_URL`, from the environment. Kronos's packages take plain options and read no environment variables.
+At shutdown, `main.ts` stops the app and then calls `close` from `config.ts`.
 
 A test composes only the slices it tests, in the same way, over in-memory stores, as [Test a slice](/docs/kronos-ts/guides/testing-a-slice) shows. A process that runs part of the application composes only its slices, as [Split across processes](/docs/kronos-ts/guides/across-processes) shows.
 

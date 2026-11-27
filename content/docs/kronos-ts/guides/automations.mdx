@@ -167,7 +167,7 @@ export const sendReceipt = (
 
 Sequence an automation by the id its command's state is keyed by, or by part of that id. The receipts' state is keyed by the rental's tool and customer, and `byCustomer` puts every rental of a customer in one sequence, so two handlings of one rental never run at once. A sequence by anything else, such as each event's own identifier, would let two events about the same rental run side by side, and on two nodes once the processor is segmented.
 
-Like `eventProcessor`, the `deadLettering` the slice receives is Kronos's `deadLettering` with part of it applied in `main.ts`: the dead-letter queue, which belongs to the whole application. The slice gives it only what is its own, the processor and its sequences, and never receives the queue.
+Like `eventProcessor`, the `deadLettering` the slice receives is Kronos's `deadLettering` with part of it applied in `config.ts`: the dead-letter queue, which belongs to the whole application. The slice gives it only what is its own, the processor and its sequences, and never receives the queue.
 
 The service slice calls no outside system. A failed batch, such as one whose `send` lost a conflict, is retried, so the count never skips a rental. The slice sequences rentals by the tool its state is keyed by, has no `deadLettering`, and takes only `eventProcessor`:
 
@@ -194,13 +194,17 @@ const receipt = sendReceipt(receipts, eventProcessor, deadLettering)
 const service = requestService(eventProcessor)
 ```
 
-`main.ts` writes the function anonymously, as it does `eventProcessor`, by applying Kronos's `deadLettering` to the application's dead-letter queue, here the one in Postgres:
+`slices/index.ts` passes both on to the context. `config.ts` builds the function as it does `eventProcessor`, by applying Kronos's `deadLettering` to the application's dead-letter queue, here the one in Postgres:
 
 ```ts
-const toolstoreHandlers = toolstore(
-  (name) => eventProcessor(name, eventStore, postgresTokenStore(pg), postgresUnitOfWork(unitOfWork, pg)),
-  (processor, sequence) => deadLettering(processor, postgresDeadLetterQueue(pg), sequence),
-)
+export const deadLettering = (processor: EventProcessor, sequence: Sequence) =>
+  coreDeadLettering(processor, postgresDeadLetterQueue(pg), sequence)
+```
+
+`main.ts` passes both to `app` from `slices/index.ts`:
+
+```ts
+const handlers = app(eventProcessor, deadLettering)
 ```
 
 An automation sends its commands as itself. When `main.ts` adds `correlatingHandler` to the wrappers every handler shares, a command carries the correlation of the rental that caused it, so a trace or a log line leads from the receipt back to the request that rented the tool. [Interception and validation](/docs/kronos-ts/interception-and-validation) and [Observability](/docs/kronos-ts/observability) describe correlation and logging. Log through `ctx.log` only what the events do not record, such as the outcome of a call.
