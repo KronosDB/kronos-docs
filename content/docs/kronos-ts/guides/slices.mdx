@@ -18,6 +18,7 @@ Every slice is a folder with the same files, and every folder belongs to a conte
     <TreeFile name="migrations.ts" note="the tables the slices write" />
     <TreeFile name="test.ts" note="`testInfrastructure`: the same composition over in-memory stores" />
     <TreeFolder name="slices">
+      <TreeFile name="index.ts" note="the app's handlers: the sum of the contexts' lists" />
       <TreeFolder name="toolstore">
         <TreeFile name="events.ts" note="the namespace and every event of the context" />
         <TreeFile name="index.ts" note="the sum of the slices' lists" />
@@ -160,30 +161,47 @@ export const toolstore = (eventProcessor: (name: string) => EventProcessor) => {
 }
 ```
 
-A new slice adds one spread to each list it has handlers for. Every level exposes the same three lists, and each level above is their sum, so the handlers are never gathered into a list of slices only to be taken apart again.
+A new slice adds one spread to each list it has handlers for.
+
+## Sum the contexts in slices/index.ts
+
+`slices/index.ts` returns the app's handlers in the same three lists. It sums the contexts the way a context sums its slices: each context is called once, and each list spreads the contexts' lists of that kind. A context that is not spread here does not run:
+
+```ts
+export const handlers = (eventProcessor: (name: string) => EventProcessor) => {
+  const toolstoreHandlers = toolstore(eventProcessor)
+  return {
+    commandHandlers: [...toolstoreHandlers.commandHandlers],
+    queryHandlers: [...toolstoreHandlers.queryHandlers],
+    eventHandlers: [...toolstoreHandlers.eventHandlers],
+  }
+}
+```
+
+A second context adds one constant and one spread to each list here, and nothing anywhere else. Every level exposes the same three lists, and each level above is their sum, so the handlers are never gathered into a list of slices only to be taken apart again.
 
 ## Compose in main.ts
 
-`main.ts` opens the infrastructure and calls each context once. The function the slices receive as `eventProcessor` is written here, anonymously, by applying Kronos's `eventProcessor` to the stores, and passed down through the context:
+`main.ts` opens the infrastructure and calls `handlers` once. It names no context. The function the slices receive as `eventProcessor` is written here, anonymously, by applying Kronos's `eventProcessor` to the stores, and passed down through the contexts:
 
 ```ts
-const toolstoreHandlers = toolstore((name) =>
+const app = handlers((name) =>
   eventProcessor(name, eventStore, postgresTokenStore(pg), postgresUnitOfWork(unitOfWork, pg)),
 )
 ```
 
-Then it passes every handler to `kronos()`. Each list is the sum of the contexts' lists of that kind, and each handler in it is piped through the wrappers the whole app shares, innermost first, and given its event store and buses:
+Then it passes every handler to `kronos()`. Each handler of each kind is piped through the wrappers the whole app shares, innermost first, and given its event store and buses:
 
 ```ts
-const app = kronos({
-  commandHandlers: [...toolstoreHandlers.commandHandlers].map((handler) => ({
+const running = kronos({
+  commandHandlers: app.commandHandlers.map((handler) => ({
     ...handler,
     handler: pipe(handler.handler, (next) => validatingHandler(next, handler.descriptor)),
     eventStore,
     commandBus,
     queryBus,
   })),
-  queryHandlers: [...toolstoreHandlers.queryHandlers].map((handler) => ({
+  queryHandlers: app.queryHandlers.map((handler) => ({
     ...handler,
     handler: pipe(
       handler.handler,
@@ -194,9 +212,7 @@ const app = kronos({
   })),
 ```
 
-A second context is called once into a constant of its own, beside the first, and adds one spread to each list in `kronos()`.
-
-The event handler list is built the same way and keeps the processor each slice gave its handlers. `postgresHandler` gives query and event handlers `ctx.sql()`, and `validatingHandler` checks the payload, the result and every appended event against their descriptors. This is the only code that combines handlers with infrastructure, so every handler gets the same wrappers. `main.ts` lists only the kinds of handler some slice has: an empty list gives TypeScript no handler to infer the type from, so the first slice of a kind adds that kind's list, written in the same way. A wrapper only one slice needs stays in that slice, inside these. [Interception and validation](/docs/kronos-ts/interception-and-validation) and [Observability](/docs/kronos-ts/observability) describe the wrappers Kronos ships.
+The event handler list is built the same way and keeps the processor each slice gave its handlers. `postgresHandler` gives query and event handlers `ctx.sql()`, and `validatingHandler` checks the payload, the result and every appended event against their descriptors. This is the only code that combines handlers with infrastructure, so every handler gets the same wrappers. `main.ts` lists only the kinds of handler some slice has: an empty list gives TypeScript no handler to infer the type from, so the first slice of a kind adds that kind's list, written in the same way. That is the only change a new slice or context makes to `main.ts`. A wrapper only one slice needs stays in that slice, inside these. [Interception and validation](/docs/kronos-ts/interception-and-validation) and [Observability](/docs/kronos-ts/observability) describe the wrappers Kronos ships.
 
 `main.ts` is also the one place that reads settings, such as `DATABASE_URL`, from the environment. Kronos's packages take plain options and read no environment variables.
 

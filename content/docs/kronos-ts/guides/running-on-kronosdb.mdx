@@ -98,15 +98,15 @@ const queryBus = localFirstQueryBus(kronosDbQueryBus(localQueries, kdb, "toolsto
 
 ## Compose the app
 
-The event store and the buses come from KronosDB. The processors' token store and unit of work come from Postgres as before, so a batch's table writes and its new position still commit in one Postgres transaction. Only what `main.ts` opens changes; the slices and the context do not:
+The event store and the buses come from KronosDB. The processors' token store and unit of work come from Postgres as before, so a batch's table writes and its new position still commit in one Postgres transaction. Only what `main.ts` opens changes; the slices, the context and `slices/index.ts` do not:
 
 ```ts
-const toolstoreHandlers = toolstore((name) =>
+const app = handlers((name) =>
   eventProcessor(name, eventStore, postgresTokenStore(pg), postgresUnitOfWork(unitOfWork, pg)),
 )
 ```
 
-The context's lists are then passed to `kronos()` with the same wrappers as in [Organize an app into slices](/docs/kronos-ts/guides/slices#compose-in-maints), and the connection is started:
+The app's lists are then passed to `kronos()` with the same wrappers as in [Organize an app into slices](/docs/kronos-ts/guides/slices#compose-in-maints), and the connection is started:
 
 ```ts
 await kdb.start()
@@ -117,7 +117,7 @@ The command bus takes the plain `unitOfWork`, because a command's events are app
 At shutdown, stop the app first, so that the processors and the running handlers finish. Then close the connection, which drains the buses and closes the socket, and close the pool last:
 
 ```ts
-await app.stop()
+await running.stop()
 await kdb.close()
 await pg.close()
 ```

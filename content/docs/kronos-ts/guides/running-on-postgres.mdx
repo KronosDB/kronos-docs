@@ -85,10 +85,10 @@ const commandBus = localCommandBus(postgresUnitOfWork(unitOfWork, pg))
 const queryBus = localQueryBus(unitOfWork)
 ```
 
-`main.ts` then calls the context once. The processors are built by the function the slices receive as `eventProcessor`, which applies Kronos's `eventProcessor` to the event store, a Postgres token store and the Postgres unit of work:
+`main.ts` then calls `handlers` from `slices/index.ts` once. The processors are built by the function the slices receive as `eventProcessor`, which applies Kronos's `eventProcessor` to the event store, a Postgres token store and the Postgres unit of work:
 
 ```ts
-const toolstoreHandlers = toolstore((name) =>
+const app = handlers((name) =>
   eventProcessor(name, eventStore, postgresTokenStore(pg), postgresUnitOfWork(unitOfWork, pg)),
 )
 ```
@@ -100,7 +100,7 @@ const toolstoreHandlers = toolstore((name) =>
 Stop the app before closing the pool. `stop()` stops every processor, which writes its position, and waits for the handlers that are running, so close the pool once it resolves:
 
 ```ts
-await app.stop()
+await running.stop()
 await pg.close()
 ```
 

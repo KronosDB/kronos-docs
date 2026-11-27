@@ -194,10 +194,10 @@ const receipt = sendReceipt(receipts, eventProcessor, deadLettering)
 const service = requestService(eventProcessor)
 ```
 
-`main.ts` writes the function anonymously, as it does `eventProcessor`, by applying Kronos's `deadLettering` to the application's dead-letter queue, here the one in Postgres:
+`slices/index.ts` passes both on to the context. `main.ts` writes the function anonymously, as it does `eventProcessor`, by applying Kronos's `deadLettering` to the application's dead-letter queue, here the one in Postgres:
 
 ```ts
-const toolstoreHandlers = toolstore(
+const app = handlers(
   (name) => eventProcessor(name, eventStore, postgresTokenStore(pg), postgresUnitOfWork(unitOfWork, pg)),
   (processor, sequence) => deadLettering(processor, postgresDeadLetterQueue(pg), sequence),
 )

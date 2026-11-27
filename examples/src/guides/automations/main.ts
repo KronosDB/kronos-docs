@@ -10,7 +10,7 @@ import {
 import { postgresDeadLetterQueue, postgresEventStore, postgresHandler, postgresPool, postgresTokenStore, postgresUnitOfWork } from "@kronos-ts/postgres"
 import { pipe } from "../../toolstore/pipe"
 import { migrate } from "../../toolstore/migrations"
-import { toolstore } from "./toolstore"
+import { handlers } from "."
 
 const pg = postgresPool(process.env.DATABASE_URL ?? "postgresql://postgres:postgres@localhost:5432/toolstore")
 await pg.start()
@@ -19,24 +19,24 @@ await migrate(pg)
 const eventStore = postgresEventStore(pg)
 const commandBus = localCommandBus(postgresUnitOfWork(unitOfWork, pg))
 const queryBus = localQueryBus(unitOfWork)
-// Each context's handlers, called once. A context is given Kronos's `eventProcessor` with this process's stores
-// applied, and Kronos's `deadLettering` with its dead-letter queue applied, and passes them to the slices that use them.
-const toolstoreHandlers = toolstore(
+// The app's handlers, from the sum of its contexts. They are given Kronos's `eventProcessor` with this process's
+// stores applied, and Kronos's `deadLettering` with its dead-letter queue applied, which reach the slices that use them.
+const app = handlers(
   (name) => eventProcessor(name, eventStore, postgresTokenStore(pg), postgresUnitOfWork(unitOfWork, pg)),
   (processor, sequence) => deadLettering(processor, postgresDeadLetterQueue(pg), sequence),
 )
 
-// Each kind's list is the sum of the contexts' lists, every handler piped through the wrappers the whole app shares,
-// innermost first, and given its infrastructure.
-const app = kronos({
-  commandHandlers: [...toolstoreHandlers.commandHandlers].map((handler) => ({
+// Every handler of each kind piped through the wrappers the whole app shares, innermost first, and given its
+// infrastructure.
+const running = kronos({
+  commandHandlers: app.commandHandlers.map((handler) => ({
     ...handler,
     handler: pipe(handler.handler, (next) => validatingHandler(next, handler.descriptor)),
     eventStore,
     commandBus,
     queryBus,
   })),
-  queryHandlers: [...toolstoreHandlers.queryHandlers].map((handler) => ({
+  queryHandlers: app.queryHandlers.map((handler) => ({
     ...handler,
     handler: pipe(
       handler.handler,
@@ -45,7 +45,7 @@ const app = kronos({
     ),
     queryBus,
   })),
-  eventHandlers: [...toolstoreHandlers.eventHandlers].map((handler) => ({
+  eventHandlers: app.eventHandlers.map((handler) => ({
     ...handler,
     handler: pipe(
       handler.handler,

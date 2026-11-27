@@ -13,7 +13,7 @@ import { postgresEventStore, postgresHandler, postgresPool, postgresTokenStore, 
 import { caughtUp } from "../../toolstore/caught-up"
 import { pipe } from "../../toolstore/pipe"
 import { migrate } from "../../toolstore/migrations"
-import { toolstore } from "../../toolstore/slices/toolstore"
+import { handlers } from "../../toolstore/slices"
 import { AddTool } from "../../toolstore/slices/toolstore/add-tool/command"
 import { GetInventory } from "../../toolstore/slices/toolstore/inventory/query"
 import { RegisterCustomer } from "../../toolstore/slices/toolstore/register-customer/command"
@@ -27,23 +27,23 @@ await migrate(pg)
 const eventStore = postgresEventStore(pg)
 const commandBus = localCommandBus(postgresUnitOfWork(unitOfWork, pg))
 const queryBus = localQueryBus(unitOfWork)
-// Each context's handlers, called once. A context is given Kronos's `eventProcessor` with this process's stores
-// applied, and passes it to the slices that build a processor.
-const toolstoreHandlers = toolstore((name) =>
+// The app's handlers, from `slices/index.ts`. They are given Kronos's `eventProcessor` with this process's stores
+// applied, which reaches every slice that builds a processor.
+const app = handlers((name) =>
   eventProcessor(name, eventStore, postgresTokenStore(pg), postgresUnitOfWork(unitOfWork, pg)),
 )
 
-// Each kind's list is the sum of the contexts' lists, every handler piped through the wrappers the whole app shares,
-// innermost first, and given its infrastructure.
-const app = kronos({
-  commandHandlers: [...toolstoreHandlers.commandHandlers].map((handler) => ({
+// Every handler of each kind piped through the wrappers the whole app shares, innermost first, and given its
+// infrastructure.
+const running = kronos({
+  commandHandlers: app.commandHandlers.map((handler) => ({
     ...handler,
     handler: pipe(handler.handler, (next) => validatingHandler(next, handler.descriptor)),
     eventStore,
     commandBus,
     queryBus,
   })),
-  queryHandlers: [...toolstoreHandlers.queryHandlers].map((handler) => ({
+  queryHandlers: app.queryHandlers.map((handler) => ({
     ...handler,
     handler: pipe(
       handler.handler,
@@ -52,7 +52,7 @@ const app = kronos({
     ),
     queryBus,
   })),
-  eventHandlers: [...toolstoreHandlers.eventHandlers].map((handler) => ({
+  eventHandlers: app.eventHandlers.map((handler) => ({
     ...handler,
     handler: pipe(
       handler.handler,
@@ -69,14 +69,14 @@ await send(commandBus, AddTool, { toolId: "t-2", model: "D24000", name: "Tile sa
 await send(commandBus, RegisterCustomer, { customerId: "ada", name: "Ada", maxRentals: 1 })
 await send(commandBus, RentTool, { toolId: "t-1", customerId: "ada" })
 
-const inventoryView = app.processors.get("inventory-view")!
+const inventoryView = running.processors.get("inventory-view")!
 const summary = async () =>
   (await query(queryBus, GetInventory, {})).map((row) => `${row.toolId} ${row.available ? "available" : "rented"}`).join(", ")
 
 await caughtUp(inventoryView, eventStore)
 console.log("before replay:", await summary())
 
-const server = serveAdmin(app.processors)
+const server = serveAdmin(running.processors)
 const started = await fetch(new URL("/admin/processors/inventory-view/replay", server.url), { method: "POST" })
 console.log("POST replay", started.status, JSON.stringify(await started.json()))
 
@@ -86,5 +86,5 @@ console.log("GET status", JSON.stringify(await status.json()))
 console.log("after replay:", await summary())
 
 await server.stop()
-await app.stop()
+await running.stop()
 await pg.close()
