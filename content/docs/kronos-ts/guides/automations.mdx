@@ -201,10 +201,10 @@ export const deadLettering = (processor: EventProcessor, sequence: Sequence) =>
   coreDeadLettering(processor, postgresDeadLetterQueue(pg), sequence)
 ```
 
-`main.ts` passes both to `handlers`:
+`main.ts` passes both to `app` from `slices/index.ts`:
 
 ```ts
-const app = handlers(eventProcessor, deadLettering)
+const handlers = app(eventProcessor, deadLettering)
 ```
 
 An automation sends its commands as itself. When `main.ts` adds `correlatingHandler` to the wrappers every handler shares, a command carries the correlation of the rental that caused it, so a trace or a log line leads from the receipt back to the request that rented the tool. [Interception and validation](/docs/kronos-ts/interception-and-validation) and [Observability](/docs/kronos-ts/observability) describe correlation and logging. Log through `ctx.log` only what the events do not record, such as the outcome of a call.

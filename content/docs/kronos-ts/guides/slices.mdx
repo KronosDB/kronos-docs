@@ -166,10 +166,10 @@ A new slice adds one spread to each list it has handlers for.
 
 ## Sum the contexts in slices/index.ts
 
-`slices/index.ts` returns the app's handlers in the same three lists. It sums the contexts the way a context sums its slices: each context is called once, and each list spreads the contexts' lists of that kind. A context that is not spread here does not run:
+`slices/index.ts` exports `app`, which returns the app's handlers in the same three lists. It sums the contexts the way a context sums its slices: each context is called once, and each list spreads the contexts' lists of that kind. A context that is not spread here does not run:
 
 ```ts
-export const handlers = (eventProcessor: (name: string) => EventProcessor) => {
+export const app = (eventProcessor: (name: string) => EventProcessor) => {
   const toolstoreHandlers = toolstore(eventProcessor)
   return {
     commandHandlers: [...toolstoreHandlers.commandHandlers],
@@ -196,24 +196,24 @@ export const eventProcessor = (name: string) =>
 
 ## Compose in main.ts
 
-`main.ts` is the final wiring. It imports the infrastructure from `config.ts` and calls `handlers` once with the functions the slices need. It names no context and no slice, and builds no infrastructure:
+`main.ts` is the final wiring. It imports the infrastructure from `config.ts` and calls `app` once with the functions the slices need. It names no context and no slice, and builds no infrastructure:
 
 ```ts
-const app = handlers(eventProcessor)
+const handlers = app(eventProcessor)
 ```
 
 Then it passes every handler to `kronos()`. Each handler of each kind is piped through the wrappers the whole app shares, innermost first, and given its event store and buses:
 
 ```ts
 const running = kronos({
-  commandHandlers: app.commandHandlers.map((handler) => ({
+  commandHandlers: handlers.commandHandlers.map((handler) => ({
     ...handler,
     handler: pipe(handler.handler, (next) => validatingHandler(next, handler.descriptor)),
     eventStore,
     commandBus,
     queryBus,
   })),
-  queryHandlers: app.queryHandlers.map((handler) => ({
+  queryHandlers: handlers.queryHandlers.map((handler) => ({
     ...handler,
     handler: pipe(
       handler.handler,

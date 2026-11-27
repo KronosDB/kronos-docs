@@ -92,7 +92,7 @@ export const eventProcessor = (name: string) =>
   coreEventProcessor(name, eventStore, postgresTokenStore(pg), postgresUnitOfWork(unitOfWork, pg))
 ```
 
-`main.ts` passes it to `handlers` from `slices/index.ts`, and wraps every query and event handler with `postgresHandler(next, pg)` over the same pool, as described in [Organize an app into slices](/docs/kronos-ts/guides/slices#compose-in-maints), so a batch's table writes and its new position commit in one transaction. A token store or an SQL client built from a different pool opens a second connection, and its writes are not atomic with the rest.
+`main.ts` passes it to `app` from `slices/index.ts`, and wraps every query and event handler with `postgresHandler(next, pg)` over the same pool, as described in [Organize an app into slices](/docs/kronos-ts/guides/slices#compose-in-maints), so a batch's table writes and its new position commit in one transaction. A token store or an SQL client built from a different pool opens a second connection, and its writes are not atomic with the rest.
 
 ## Shut down in order
 

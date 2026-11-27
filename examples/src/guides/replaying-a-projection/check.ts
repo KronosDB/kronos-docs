@@ -4,7 +4,7 @@ import { postgresHandler } from "@kronos-ts/postgres"
 import { caughtUp } from "../../toolstore/caught-up"
 import { close, commandBus, eventProcessor, eventStore, pg, queryBus } from "../../toolstore/config"
 import { pipe } from "../../toolstore/pipe"
-import { handlers } from "../../toolstore/slices"
+import { app } from "../../toolstore/slices"
 import { AddTool } from "../../toolstore/slices/toolstore/add-tool/command"
 import { GetInventory } from "../../toolstore/slices/toolstore/inventory/query"
 import { RegisterCustomer } from "../../toolstore/slices/toolstore/register-customer/command"
@@ -12,18 +12,18 @@ import { RentTool } from "../../toolstore/slices/toolstore/rent-tool/command"
 import { serveAdmin } from "./server"
 
 // The final wiring: the app's handlers (slices/index.ts) wired to the infrastructure (config.ts).
-const app = handlers(eventProcessor)
+const handlers = app(eventProcessor)
 
 // Each kind's wrappers, innermost first.
 const running = kronos({
-  commandHandlers: app.commandHandlers.map((handler) => ({
+  commandHandlers: handlers.commandHandlers.map((handler) => ({
     ...handler,
     handler: pipe(handler.handler, (next) => validatingHandler(next, handler.descriptor)),
     eventStore,
     commandBus,
     queryBus,
   })),
-  queryHandlers: app.queryHandlers.map((handler) => ({
+  queryHandlers: handlers.queryHandlers.map((handler) => ({
     ...handler,
     handler: pipe(
       handler.handler,
@@ -32,7 +32,7 @@ const running = kronos({
     ),
     queryBus,
   })),
-  eventHandlers: app.eventHandlers.map((handler) => ({
+  eventHandlers: handlers.eventHandlers.map((handler) => ({
     ...handler,
     handler: pipe(
       handler.handler,

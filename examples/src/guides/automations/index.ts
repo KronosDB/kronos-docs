@@ -5,7 +5,7 @@ import { toolstore } from "./toolstore"
  * The app's handlers: each list is the sum of its contexts' lists of that kind, the way a context sums its slices'.
  * A context that is not spread here does not run.
  */
-export const handlers = (
+export const app = (
   eventProcessor: (name: string) => EventProcessor,
   deadLettering: (processor: EventProcessor, sequence: Sequence) => EventProcessor,
 ) => {
