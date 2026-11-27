@@ -35,51 +35,43 @@ await pg.start()
 const eventStore = postgresEventStore(pg)
 const commandBus = localCommandBus(postgresUnitOfWork(unitOfWork, pg))
 const queryBus = localQueryBus(unitOfWork)
-// Every slice's handlers, its processors built over this process's stores.
-const handlers = [
-  addTool(),
-  registerCustomer(),
-  rentTool(),
-  inventory((name) => eventProcessor(name, eventStore, postgresTokenStore(pg), postgresUnitOfWork(unitOfWork, pg))),
-]
+// A slice that builds a processor is called once, its processor built over this process's stores.
+const inventoryView = inventory((name) =>
+  eventProcessor(name, eventStore, postgresTokenStore(pg), postgresUnitOfWork(unitOfWork, pg)),
+)
 
 // Every handler piped through the wrappers the whole app shares, innermost first, and given its infrastructure.
 const app = kronos({
-  commandHandlers: handlers
-    .map((slice) => slice.commandHandlers)
-    .flat()
-    .map((handler) => ({
-      ...handler,
-      handler: pipe(handler.handler, (next) => validatingHandler(next, handler.descriptor)),
-      eventStore,
-      commandBus,
-      queryBus,
-    })),
-  queryHandlers: handlers
-    .map((slice) => slice.queryHandlers)
-    .flat()
-    .map((handler) => ({
-      ...handler,
-      handler: pipe(
-        handler.handler,
-        (next) => postgresHandler(next, pg),
-        (next) => validatingHandler(next, handler.descriptor),
-      ),
-      queryBus,
-    })),
-  eventHandlers: handlers
-    .map((slice) => slice.eventHandlers)
-    .flat()
-    .map((handler) => ({
-      ...handler,
-      handler: pipe(
-        handler.handler,
-        (next) => postgresHandler(next, pg),
-        (next) => validatingHandler(next, handler.descriptor),
-      ),
-      commandBus,
-      queryBus,
-    })),
+  commandHandlers: [
+    ...addTool().commandHandlers,
+    ...registerCustomer().commandHandlers,
+    ...rentTool().commandHandlers,
+  ].map((handler) => ({
+    ...handler,
+    handler: pipe(handler.handler, (next) => validatingHandler(next, handler.descriptor)),
+    eventStore,
+    commandBus,
+    queryBus,
+  })),
+  queryHandlers: [...inventoryView.queryHandlers].map((handler) => ({
+    ...handler,
+    handler: pipe(
+      handler.handler,
+      (next) => postgresHandler(next, pg),
+      (next) => validatingHandler(next, handler.descriptor),
+    ),
+    queryBus,
+  })),
+  eventHandlers: [...inventoryView.eventHandlers].map((handler) => ({
+    ...handler,
+    handler: pipe(
+      handler.handler,
+      (next) => postgresHandler(next, pg),
+      (next) => validatingHandler(next, handler.descriptor),
+    ),
+    commandBus,
+    queryBus,
+  })),
 })
 
 await send(commandBus, AddTool, { toolId: "t-1", model: "DCD791", name: "Cordless drill" })

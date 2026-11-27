@@ -11,20 +11,19 @@ import { connect } from "./kronosdb-infrastructure"
 const infrastructure = await connect("tool-commands")
 const { eventStore, commandBus, queryBus } = infrastructure
 
-// This process runs the command slices.
-const handlers = [addTool(), registerCustomer(), rentTool()]
-
+// This process runs the command slices: its list is the sum of theirs.
 const app = kronos({
-  commandHandlers: handlers
-    .map((slice) => slice.commandHandlers)
-    .flat()
-    .map((handler) => ({
-      ...handler,
-      handler: pipe(handler.handler, (next) => validatingHandler(next, handler.descriptor)),
-      eventStore,
-      commandBus,
-      queryBus,
-    })),
+  commandHandlers: [
+    ...addTool().commandHandlers,
+    ...registerCustomer().commandHandlers,
+    ...rentTool().commandHandlers,
+  ].map((handler) => ({
+    ...handler,
+    handler: pipe(handler.handler, (next) => validatingHandler(next, handler.descriptor)),
+    eventStore,
+    commandBus,
+    queryBus,
+  })),
 })
 await infrastructure.start()
 console.log("commands process ready")

@@ -2,7 +2,7 @@ import { state } from "@kronos-ts/core"
 import { z } from "zod"
 import { ReceiptSent } from "../../../toolstore/slices/toolstore/events"
 
-/** Whether the receipt for this rental has been sent. */
+/** Whether the receipt for this rental has been sent: what the command decides with. */
 export const Receipt = state({
   id: { toolId: z.string(), customerId: z.string() },
   tags: (id) => ({ toolId: id.toolId, customerId: id.customerId }),

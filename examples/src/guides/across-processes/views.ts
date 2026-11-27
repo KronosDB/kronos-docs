@@ -11,34 +11,28 @@ const infrastructure = await connect("tool-views")
 const { commandBus, queryBus, pg } = infrastructure
 
 // This process runs the inventory slice.
-const handlers = [inventory(infrastructure.eventProcessor)]
+const inventoryView = inventory(infrastructure.eventProcessor)
 
 const app = kronos({
-  queryHandlers: handlers
-    .map((slice) => slice.queryHandlers)
-    .flat()
-    .map((handler) => ({
-      ...handler,
-      handler: pipe(
-        handler.handler,
-        (next) => postgresHandler(next, pg),
-        (next) => validatingHandler(next, handler.descriptor),
-      ),
-      queryBus,
-    })),
-  eventHandlers: handlers
-    .map((slice) => slice.eventHandlers)
-    .flat()
-    .map((handler) => ({
-      ...handler,
-      handler: pipe(
-        handler.handler,
-        (next) => postgresHandler(next, pg),
-        (next) => validatingHandler(next, handler.descriptor),
-      ),
-      commandBus,
-      queryBus,
-    })),
+  queryHandlers: [...inventoryView.queryHandlers].map((handler) => ({
+    ...handler,
+    handler: pipe(
+      handler.handler,
+      (next) => postgresHandler(next, pg),
+      (next) => validatingHandler(next, handler.descriptor),
+    ),
+    queryBus,
+  })),
+  eventHandlers: [...inventoryView.eventHandlers].map((handler) => ({
+    ...handler,
+    handler: pipe(
+      handler.handler,
+      (next) => postgresHandler(next, pg),
+      (next) => validatingHandler(next, handler.descriptor),
+    ),
+    commandBus,
+    queryBus,
+  })),
 })
 await infrastructure.start()
 console.log("views process ready")

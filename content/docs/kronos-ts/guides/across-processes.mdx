@@ -78,24 +78,29 @@ Both versions build the local buses first, and the transport buses wrap them. `s
 
 ## Run the command slices
 
-The commands process calls its three command slices. It has no processor, because none of its slices has an event handler:
+The commands process calls its three command slices. Its command handler list is the sum of their lists, and it has no processor, because none of its slices has an event handler:
 
 ```ts
 const infrastructure = await connect("tool-commands")
 const { eventStore, commandBus, queryBus } = infrastructure
 
-// This process runs the command slices.
-const handlers = [addTool(), registerCustomer(), rentTool()]
+// This process runs the command slices: its list is the sum of theirs.
+const app = kronos({
+  commandHandlers: [
+    ...addTool().commandHandlers,
+    ...registerCustomer().commandHandlers,
+    ...rentTool().commandHandlers,
+  ].map((handler) => ({
 ```
 
-The rest of the file is the composition from [Organize an app into slices](/docs/kronos-ts/guides/slices#compose-in-maints): `kronos()` with every handler wrapped and given the infrastructure from `connect`. A process that has no query or event handlers leaves those lists out. Then the process starts its connection with `await infrastructure.start()`.
+The rest of the file is the composition from [Organize an app into slices](/docs/kronos-ts/guides/slices#compose-in-maints): every handler wrapped and given the infrastructure from `connect`. A process that has no query or event handlers leaves those lists out. Then the process starts its connection with `await infrastructure.start()`.
 
 ## Run the inventory slice
 
 The views process calls the inventory slice with the `eventProcessor` from `connect`, and composes its handlers in the same way. The slice builds its `inventory-view` processor, which reads every event the commands process appends:
 
 ```ts
-const handlers = [inventory(infrastructure.eventProcessor)]
+const inventoryView = inventory(infrastructure.eventProcessor)
 ```
 
 The processor's position is in Postgres, so after a restart the views process resumes where it stopped. A second views process on the same database shares the processor's segments with the first, as described in [Event processors](/docs/kronos-ts/event-processors).

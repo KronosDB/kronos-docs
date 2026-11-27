@@ -32,13 +32,19 @@ const commandBus = recordingCommandBus(localCommandBus(unitOfWork))
 const queryBus = localQueryBus(unitOfWork)
 ```
 
-`testInfrastructure()` returns two functions. `app(...slices)` passes the handlers of the slices a test gives it to `kronos()`, with the same wrappers and infrastructure as `main.ts`, and stops the app after the file's last test. `eventProcessor` is the function a read model slice takes, applied to the test's stores:
+`testInfrastructure()` returns three functions. `app(handlers)` takes one set of the three lists, a slice's or a context's, and passes them to `kronos()` with the same wrappers and infrastructure as `main.ts`, and stops the app after the file's last test. `eventProcessor` is the function a read model slice takes, applied to the test's stores:
 
 ```ts
 eventProcessor: (name: string) =>
   database
     ? eventProcessor(name, eventStore, postgresTokenStore(pg), postgresUnitOfWork(unitOfWork, pg))
     : eventProcessor(name, eventStore, inMemoryTokenStore(), unitOfWork),
+```
+
+`deadLettering` is the function a slice whose processor parks failures takes, applied to a dead-letter queue of the test's own, in the test's database or in memory:
+
+```ts
+deadLettering: (processor: EventProcessor, sequence: Sequence) => deadLettering(processor, deadLetterQueue, sequence),
 ```
 
 A command slice needs no database. `testInfrastructure({ db: true })` creates a database for the test file, runs the migrations in it, drops it after the last test, and puts the processors' positions in it. Without it, the app is given a pool that is never opened, which a slice without tables never uses. Set `TEST_DATABASE_URL` to a server where the tests may create databases.
