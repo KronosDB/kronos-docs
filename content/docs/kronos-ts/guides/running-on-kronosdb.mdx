@@ -5,7 +5,7 @@ description: Start a KronosDB server, declare a context for the tool store, and 
 
 When you are done, a KronosDB server holds the tool store's events in a context named `toolstore`, and the app's commands and queries go through that server, so they reach every instance of the app. The read models and the processors' positions stay in Postgres. You need Docker to run the server, and the tool store from [Run on Postgres](/docs/kronos-ts/guides/running-on-postgres). KronosDB 0.12 or later is required, because the client uses KronosDB's native protocol.
 
-The slices do not change. `main.ts` builds three things over KronosDB instead of Postgres: the event store, the command bus and the query bus.
+The slices do not change, and neither does `main.ts`. `config.ts` builds three things over KronosDB instead of Postgres: the event store, the command bus and the query bus.
 
 ## Start the server
 
@@ -69,10 +69,10 @@ npm install @kronos-ts/kronosdb
 
 ## Connect
 
-`kronosDbConnection` takes the address of the server, the `context` to use by default, a `componentName` that identifies this application to the server, and the serializer for event and message payloads. The event store and both buses share the one connection.
+`kronosDbConnection` takes the address of the server, the `context` to use by default, a `componentName` that identifies this application to the server, and the serializer for event and message payloads. The event store and both buses share the one connection, which `config.ts` opens and exports:
 
 ```ts
-const kdb = await kronosDbConnection({
+export const kdb = await kronosDbConnection({
   host: process.env.KRONOSDB_HOST ?? "localhost",
   port: Number(process.env.KRONOSDB_PORT ?? 50051),
   context: "toolstore",
@@ -88,25 +88,24 @@ When the server requires a token or TLS, the same options object takes `token` a
 The event store takes the connection and the name of the context. Each bus wraps a local bus, which runs the handlers of this instance, and takes the connection and the name of a bus. A **bus** in KronosDB is a namespace for commands and queries, independent of contexts, and the tool store gives its buses the same name as its context.
 
 ```ts
-const eventStore = kronosDbEventStore(kdb, "toolstore")
-const commandBus = kronosDbCommandBus(localCommandBus(unitOfWork), kdb, "toolstore")
+export const eventStore = kronosDbEventStore(kdb, "toolstore")
+export const commandBus = kronosDbCommandBus(localCommandBus(unitOfWork), kdb, "toolstore")
 const localQueries = localQueryBus(unitOfWork)
-const queryBus = localFirstQueryBus(kronosDbQueryBus(localQueries, kdb, "toolstore"), localQueries)
+export const queryBus = localFirstQueryBus(kronosDbQueryBus(localQueries, kdb, "toolstore"), localQueries)
 ```
 
 [Split across processes](/docs/kronos-ts/guides/across-processes) describes local-first buses. Every command is sent to the server, even when this instance handles it. The server spreads commands over the instances that handle them, so with several instances each takes a share. Queries are handled locally first with `localFirstQueryBus`: every instance reads the same Postgres tables, so another instance would return the same rows after a round trip.
 
 ## Compose the app
 
-The event store and the buses come from KronosDB. The processors' token store and unit of work come from Postgres as before, so a batch's table writes and its new position still commit in one Postgres transaction. Only what `main.ts` opens changes; the slices, the context and `slices/index.ts` do not:
+The event store and the buses come from KronosDB. The processors' token store and unit of work come from Postgres as before, so a batch's table writes and its new position still commit in one Postgres transaction, and `config.ts` applies Kronos's `eventProcessor` to these stores:
 
 ```ts
-const app = handlers((name) =>
-  eventProcessor(name, eventStore, postgresTokenStore(pg), postgresUnitOfWork(unitOfWork, pg)),
-)
+export const eventProcessor = (name: string): EventProcessor =>
+  coreEventProcessor(name, eventStore, postgresTokenStore(pg), postgresUnitOfWork(unitOfWork, pg))
 ```
 
-The app's lists are then passed to `kronos()` with the same wrappers as in [Organize an app into slices](/docs/kronos-ts/guides/slices#compose-in-maints), and the connection is started:
+Only `config.ts` changes. The slices, the context, `slices/index.ts` and the wiring in `main.ts` stay as in [Organize an app into slices](/docs/kronos-ts/guides/slices#compose-in-maints). The one line `main.ts` adds for KronosDB starts the connection, once `kronos()` has subscribed every handler:
 
 ```ts
 await kdb.start()
@@ -114,15 +113,16 @@ await kdb.start()
 
 The command bus takes the plain `unitOfWork`, because a command's events are appended to KronosDB, not written in a Postgres transaction. Await `kdb.start()` after `kronos()`. It resolves once the server has acknowledged every handler, and from then on the server can route commands and queries to them.
 
-At shutdown, stop the app first, so that the processors and the running handlers finish. Then close the connection, which drains the buses and closes the socket, and close the pool last:
+At shutdown, stop the app first, so that the processors and the running handlers finish. Then `close` from `config.ts` closes the connection, which drains the buses and closes the socket, and closes the pool last:
 
 ```ts
-await running.stop()
-await kdb.close()
-await pg.close()
+export const close = async () => {
+  await kdb.close()
+  await pg.close()
+}
 ```
 
-Remote administration is separate and optional. With `kronosDbControlPlane(kdb, toolstore.processors)`, created before `kdb.start()`, the admin console can pause, start, split and merge this application's processors and shows their status.
+Remote administration is separate and optional. With `kronosDbControlPlane(kdb, running.processors)`, created before `kdb.start()`, the admin console can pause, start, split and merge this application's processors and shows their status.
 
 ## Checking it works
 

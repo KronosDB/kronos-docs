@@ -1,18 +1,9 @@
 /// <reference types="../../../../../kronos-ts/node_modules/bun-types" />
-import {
-  eventProcessor,
-  kronos,
-  localCommandBus,
-  localQueryBus,
-  query,
-  send,
-  unitOfWork,
-  validatingHandler,
-} from "@kronos-ts/core"
-import { postgresEventStore, postgresHandler, postgresPool, postgresTokenStore, postgresUnitOfWork } from "@kronos-ts/postgres"
+import { kronos, query, send, validatingHandler } from "@kronos-ts/core"
+import { postgresHandler } from "@kronos-ts/postgres"
 import { caughtUp } from "../../toolstore/caught-up"
+import { close, commandBus, eventProcessor, eventStore, pg, queryBus } from "../../toolstore/config"
 import { pipe } from "../../toolstore/pipe"
-import { migrate } from "../../toolstore/migrations"
 import { handlers } from "../../toolstore/slices"
 import { AddTool } from "../../toolstore/slices/toolstore/add-tool/command"
 import { GetInventory } from "../../toolstore/slices/toolstore/inventory/query"
@@ -20,18 +11,8 @@ import { RegisterCustomer } from "../../toolstore/slices/toolstore/register-cust
 import { RentTool } from "../../toolstore/slices/toolstore/rent-tool/command"
 import { serveAdmin } from "./server"
 
-const pg = postgresPool(process.env.DATABASE_URL ?? "postgresql://postgres:postgres@localhost:5432/toolstore")
-await pg.start()
-await migrate(pg)
-
-const eventStore = postgresEventStore(pg)
-const commandBus = localCommandBus(postgresUnitOfWork(unitOfWork, pg))
-const queryBus = localQueryBus(unitOfWork)
-// The app's handlers, from `slices/index.ts`. They are given Kronos's `eventProcessor` with this process's stores
-// applied, which reaches every slice that builds a processor.
-const app = handlers((name) =>
-  eventProcessor(name, eventStore, postgresTokenStore(pg), postgresUnitOfWork(unitOfWork, pg)),
-)
+// The app's handlers, given the partially applied functions from `config.ts`.
+const app = handlers(eventProcessor)
 
 // Every handler of each kind piped through the wrappers the whole app shares, innermost first, and given its
 // infrastructure.
@@ -87,4 +68,4 @@ console.log("after replay:", await summary())
 
 await server.stop()
 await running.stop()
-await pg.close()
+await close()

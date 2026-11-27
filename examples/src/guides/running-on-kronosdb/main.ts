@@ -1,50 +1,16 @@
-import {
-  eventProcessor,
-  jsonSerializer,
-  kronos,
-  localCommandBus,
-  localFirstQueryBus,
-  localQueryBus,
-  query,
-  send,
-  unitOfWork,
-  validatingHandler,
-} from "@kronos-ts/core"
-import { kronosDbCommandBus, kronosDbConnection, kronosDbEventStore, kronosDbQueryBus } from "@kronos-ts/kronosdb"
-import { postgresHandler, postgresPool, postgresTokenStore, postgresUnitOfWork } from "@kronos-ts/postgres"
+import { kronos, query, send, validatingHandler } from "@kronos-ts/core"
+import { postgresHandler } from "@kronos-ts/postgres"
 import { caughtUp } from "../../toolstore/caught-up"
 import { pipe } from "../../toolstore/pipe"
-import { migrate } from "../../toolstore/migrations"
 import { handlers } from "../../toolstore/slices"
 import { AddTool } from "../../toolstore/slices/toolstore/add-tool/command"
 import { GetInventory } from "../../toolstore/slices/toolstore/inventory/query"
 import { RegisterCustomer } from "../../toolstore/slices/toolstore/register-customer/command"
 import { RentTool } from "../../toolstore/slices/toolstore/rent-tool/command"
+import { close, commandBus, eventProcessor, eventStore, kdb, pg, queryBus } from "./config"
 
-// Postgres: the read models, the processors' positions and the dead letters.
-const pg = postgresPool(process.env.DATABASE_URL ?? "postgresql://postgres:postgres@localhost:5432/toolstore")
-await pg.start()
-await migrate(pg)
-
-// KronosDB: the event log and both buses, over one connection.
-const kdb = await kronosDbConnection({
-  host: process.env.KRONOSDB_HOST ?? "localhost",
-  port: Number(process.env.KRONOSDB_PORT ?? 50051),
-  context: "toolstore",
-  componentName: "toolstore",
-  serializer: jsonSerializer(),
-})
-
-const eventStore = kronosDbEventStore(kdb, "toolstore")
-const commandBus = kronosDbCommandBus(localCommandBus(unitOfWork), kdb, "toolstore")
-const localQueries = localQueryBus(unitOfWork)
-const queryBus = localFirstQueryBus(kronosDbQueryBus(localQueries, kdb, "toolstore"), localQueries)
-
-// The app's handlers, from `slices/index.ts`. They are given Kronos's `eventProcessor` with this process's stores
-// applied, which reaches every slice that builds a processor.
-const app = handlers((name) =>
-  eventProcessor(name, eventStore, postgresTokenStore(pg), postgresUnitOfWork(unitOfWork, pg)),
-)
+// The app's handlers, given the partially applied functions from `config.ts`.
+const app = handlers(eventProcessor)
 
 // Every handler of each kind piped through the wrappers the whole app shares, innermost first, and given its
 // infrastructure.
@@ -94,5 +60,4 @@ for (const tool of await query(queryBus, GetInventory, {})) {
 }
 
 await running.stop()
-await kdb.close()
-await pg.close()
+await close()

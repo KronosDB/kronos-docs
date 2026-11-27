@@ -89,7 +89,7 @@ A projection that gets a new table or column also needs its rows rebuilt from th
 
 ## Apply the migrations at startup
 
-`main.ts` applies the migrations before it builds the event store, replacing `migrations.ts` and its list of statements. Drizzle's migrator records each migration it has applied in `drizzle.__drizzle_migrations`, so a restart applies only the new ones. It uses a connection of its own, which `main.ts` closes before the app starts:
+`config.ts` applies the migrations before it builds the event store, replacing `migrations.ts` and its list of statements. Drizzle's migrator records each migration it has applied in `drizzle.__drizzle_migrations`, so a restart applies only the new ones. It uses a connection of its own, which `main.ts` closes before the app starts:
 
 ```ts
 const migrator = drizzle(databaseUrl)
@@ -124,7 +124,7 @@ The inventory slice's function wraps its own handlers with `drizzleHandler`. `ma
 eventHandlers: projection.map((handler) => ({ ...handler, handler: pipe(handler.handler, drizzleHandler), processor })),
 ```
 
-Nothing else changes: the slice function's arguments, the context and `main.ts` stay as they were. Slices that write plain SQL keep working beside it, because `ctx.sql()` is still there.
+Nothing else changes: the slice function's arguments, the context and the wiring in `main.ts` stay as they were. Slices that write plain SQL keep working beside it, because `ctx.sql()` is still there.
 
 ## Write the table with ctx.db
 
