@@ -12,10 +12,10 @@ import { RentTool } from "../../toolstore/slices/toolstore/rent-tool/command"
 import { close, commandBus, eventProcessor, eventStore, pg, queryBus } from "./config"
 import { inventory } from "./inventory"
 
-// A slice that builds a processor is called once, with the partially applied `eventProcessor` from `config.ts`.
+// A slice that builds a processor is called once.
 const inventoryView = inventory(eventProcessor)
 
-// Every handler piped through the wrappers the whole app shares, innermost first, and given its infrastructure.
+// Each kind's wrappers, innermost first.
 const running = kronos({
   commandHandlers: [
     ...addTool().commandHandlers,

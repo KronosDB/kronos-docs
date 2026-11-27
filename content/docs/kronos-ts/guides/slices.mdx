@@ -188,7 +188,7 @@ A second context adds one constant and one spread to each list here, and nothing
 The function the slices receive as `eventProcessor` is written here too, by applying Kronos's `eventProcessor` to the stores:
 
 ```ts
-export const eventProcessor = (name: string): EventProcessor =>
+export const eventProcessor = (name: string) =>
   coreEventProcessor(name, eventStore, postgresTokenStore(pg), postgresUnitOfWork(unitOfWork, pg))
 ```
 

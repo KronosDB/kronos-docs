@@ -9,11 +9,10 @@ import { GetInventory } from "./slices/toolstore/inventory/query"
 import { RegisterCustomer } from "./slices/toolstore/register-customer/command"
 import { RentTool } from "./slices/toolstore/rent-tool/command"
 
-// The app's handlers, given the partially applied functions from `config.ts`.
+// The final wiring: the app's handlers (slices/index.ts) wired to the infrastructure (config.ts).
 const app = handlers(eventProcessor)
 
-// Every handler of each kind piped through the wrappers the whole app shares, innermost first, and given its
-// infrastructure.
+// Each kind's wrappers, innermost first.
 const running = kronos({
   commandHandlers: app.commandHandlers.map((handler) => ({
     ...handler,

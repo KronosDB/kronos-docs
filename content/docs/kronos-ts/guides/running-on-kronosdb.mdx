@@ -101,7 +101,7 @@ export const queryBus = localFirstQueryBus(kronosDbQueryBus(localQueries, kdb, "
 The event store and the buses come from KronosDB. The processors' token store and unit of work come from Postgres as before, so a batch's table writes and its new position still commit in one Postgres transaction, and `config.ts` applies Kronos's `eventProcessor` to these stores:
 
 ```ts
-export const eventProcessor = (name: string): EventProcessor =>
+export const eventProcessor = (name: string) =>
   coreEventProcessor(name, eventStore, postgresTokenStore(pg), postgresUnitOfWork(unitOfWork, pg))
 ```
 

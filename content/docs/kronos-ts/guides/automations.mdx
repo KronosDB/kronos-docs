@@ -197,7 +197,7 @@ const service = requestService(eventProcessor)
 `slices/index.ts` passes both on to the context. `config.ts` builds the function as it does `eventProcessor`, by applying Kronos's `deadLettering` to the application's dead-letter queue, here the one in Postgres:
 
 ```ts
-export const deadLettering = (processor: EventProcessor, sequence: Sequence): EventProcessor =>
+export const deadLettering = (processor: EventProcessor, sequence: Sequence) =>
   coreDeadLettering(processor, postgresDeadLetterQueue(pg), sequence)
 ```
 

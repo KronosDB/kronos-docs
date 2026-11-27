@@ -88,7 +88,7 @@ export const queryBus = localQueryBus(unitOfWork)
 `config.ts` also exports the function the slices receive as `eventProcessor`. It applies Kronos's `eventProcessor` to the event store, a Postgres token store and the Postgres unit of work, so a slice gives it only a name:
 
 ```ts
-export const eventProcessor = (name: string): EventProcessor =>
+export const eventProcessor = (name: string) =>
   coreEventProcessor(name, eventStore, postgresTokenStore(pg), postgresUnitOfWork(unitOfWork, pg))
 ```
 

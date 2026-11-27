@@ -4,11 +4,10 @@ import { commandBus, deadLettering, eventProcessor, eventStore, pg, queryBus } f
 import { pipe } from "../../toolstore/pipe"
 import { handlers } from "."
 
-// The app's handlers, given the partially applied functions from `config.ts`.
+// The final wiring: the app's handlers (slices/index.ts) wired to the infrastructure (config.ts).
 const app = handlers(eventProcessor, deadLettering)
 
-// Every handler of each kind piped through the wrappers the whole app shares, innermost first, and given its
-// infrastructure.
+// Each kind's wrappers, innermost first.
 const running = kronos({
   commandHandlers: app.commandHandlers.map((handler) => ({
     ...handler,
